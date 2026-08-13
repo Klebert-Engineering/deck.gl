@@ -4,9 +4,10 @@
 
 import View, {CommonViewState, CommonViewProps} from './view';
 import WebMercatorViewport from '../viewports/web-mercator-viewport';
-import MapController from '../controllers/map-controller';
+import MapController, {type MapControllerOptions} from '../controllers/map-controller';
 
 import type {NumericArray} from '../types/types';
+import type {ControllerOptions} from '../controllers/controller';
 
 export type MapViewState = {
   /** Longitude of the map center */
@@ -35,7 +36,7 @@ export type MapViewState = {
   farZ?: number;
 } & CommonViewState;
 
-export type MapViewProps = {
+export type MapViewProps<OptionsT extends ControllerOptions = MapControllerOptions> = {
   /** Whether to render multiple copies of the map at low zoom levels. Default `false`. */
   repeat?: boolean;
   /** Scaler for the near plane, 1 unit equals to the height of the viewport. Default to `0.1`. Overwrites the `near` parameter. */
@@ -50,7 +51,7 @@ export type MapViewProps = {
   altitude?: number;
   /** Whether to create an orthographic or perspective projection matrix. Default is `false` (perspective projection). */
   orthographic?: boolean;
-} & CommonViewProps<MapViewState>;
+} & CommonViewProps<MapViewState, OptionsT>;
 
 export default class MapView extends View<MapViewState, MapViewProps> {
   static displayName = 'MapView';

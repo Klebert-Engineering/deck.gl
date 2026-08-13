@@ -72,6 +72,105 @@ export type WebMercatorViewportOptions = {
   legacyMeterSizes?: boolean;
 };
 
+/** Options for reconstructing a map view around a world-space target. */
+export type WebMercatorTargetViewStateOptions = {
+  /** World coordinate as `[longitude, latitude, altitude]`. */
+  target: [number, number, number];
+  /** Target position in view-local CSS pixels. */
+  screenPosition: [number, number];
+  /** Requested map bearing. Defaults to the source viewport's bearing. */
+  bearing?: number;
+  /** Requested map pitch. Defaults to the source viewport's pitch. */
+  pitch?: number;
+  /** Requested map zoom. Defaults to the source viewport's zoom. */
+  zoom?: number;
+};
+
+/** Canonical map state reconstructed by {@link WebMercatorViewport.getTargetViewState}. */
+export type WebMercatorTargetViewState = {
+  /** Longitude in degrees, kept continuous with the source viewport's rendered world copy. */
+  longitude: number;
+  /** Latitude in degrees. */
+  latitude: number;
+  /** Requested map zoom. */
+  zoom: number;
+  /** Requested map bearing in degrees. */
+  bearing: number;
+  /** Requested map pitch in degrees. */
+  pitch: number;
+  /** Meter offset that represents the reconstructed camera center. */
+  position: [number, number, number];
+};
+
+/** Camera-relative information about a world-space target. */
+export type WebMercatorTargetInfo = {
+  /** Target localized to the world copy rendered by this viewport. */
+  target: [number, number, number];
+  /** Projected target as view-local `[x, y, depth]`. */
+  projectedPosition: [number, number, number];
+  /** Physical distance between the camera and target, in meters. */
+  targetDistance: number;
+  /** Positive distance from the camera along its forward axis, in view space. */
+  cameraDepth: number;
+  /** Near clipping distance in view space. */
+  near: number;
+  /** Far clipping distance in view space. */
+  far: number;
+  /** Whether the target is finite, front-facing, and strictly inside the clip volume. */
+  isValid: boolean;
+  /** Whether the valid target also projects inside the viewport's pixel bounds. */
+  isVisible: boolean;
+};
+
+const MINIMUM_TARGET_SCALE = 32 * Number.EPSILON;
+
+function isFiniteArray(values: ArrayLike<number>): boolean {
+  for (let index = 0; index < values.length; index++) {
+    if (!Number.isFinite(values[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function hasStableInverse(matrix: Matrix4): boolean {
+  const values = matrix as unknown as ArrayLike<number>;
+  if (!isFiniteArray(values)) {
+    return false;
+  }
+  const determinant = matrix.determinant();
+  if (!Number.isFinite(determinant) || determinant === 0) {
+    return false;
+  }
+  const inverse = new Matrix4(matrix).invert();
+  if (!isFiniteArray(inverse)) {
+    return false;
+  }
+  // A dimensionless infinity-norm condition estimate is invariant to uniform matrix scaling.
+  // Unlike comparing the determinant to the fourth power of the largest entry, it also does not
+  // reject ordinary low-zoom view matrices or moderate model translations.
+  const condition = matrixInfinityNorm(values) * matrixInfinityNorm(inverse);
+  return Number.isFinite(condition) && condition <= 1 / MINIMUM_TARGET_SCALE;
+}
+
+/** Infinity norm (maximum absolute row sum) of a column-major 4x4 matrix. */
+function matrixInfinityNorm(values: ArrayLike<number>): number {
+  let norm = 0;
+  for (let row = 0; row < 4; row++) {
+    let rowSum = 0;
+    for (let column = 0; column < 4; column++) {
+      rowSum += Math.abs(values[column * 4 + row]);
+    }
+    norm = Math.max(norm, rowSum);
+  }
+  return norm;
+}
+
+/** Returns the equivalent longitude nearest to a reference world copy. */
+function normalizeLongitude(longitude: number, reference: number): number {
+  return longitude + 360 * Math.round((reference - longitude) / 360);
+}
+
 /**
  * Manages transformations to/from WGS84 coordinates using the Web Mercator Projection.
  */
@@ -85,11 +184,19 @@ export default class WebMercatorViewport extends Viewport {
   altitude: number;
   fovy: number;
   orthographic: boolean;
+  /** Whether this viewport supports target-relative perspective camera reconstruction. */
+  readonly supportsTargetNavigation: boolean;
 
   /** Each sub viewport renders one copy of the world if repeat:true. The list is generated and cached on first request. */
   private _subViewports: WebMercatorViewport[] | null;
   /** @deprecated Revert to approximated meter size calculation prior to v8.5 */
   private _pseudoMeters: boolean;
+  /** Whether target-relative camera operations are unsupported because the lens is custom. */
+  private _hasCustomProjectionMatrix: boolean;
+  /** World-copy offset applied to this viewport's view matrix. */
+  private _worldOffset: number;
+  /** Whether the dimensions supplied by the caller are usable for camera reconstruction. */
+  private _hasValidDimensions: boolean;
 
   /* eslint-disable complexity, max-statements */
   constructor(opts: WebMercatorViewportOptions = {}) {
@@ -210,6 +317,16 @@ export default class WebMercatorViewport extends Viewport {
 
     this._subViewports = repeat ? [] : null;
     this._pseudoMeters = legacyMeterSizes;
+    this._hasCustomProjectionMatrix = Boolean(projectionMatrix);
+    this._worldOffset = worldOffset;
+    this._hasValidDimensions =
+      (opts.width === undefined || (Number.isFinite(opts.width) && opts.width > 0)) &&
+      (opts.height === undefined || (Number.isFinite(opts.height) && opts.height > 0));
+    this.supportsTargetNavigation =
+      !orthographic &&
+      !this._hasCustomProjectionMatrix &&
+      !this._pseudoMeters &&
+      this._hasValidDimensions;
 
     Object.freeze(this);
   }
@@ -293,6 +410,224 @@ export default class WebMercatorViewport extends Viewport {
     const targetZ = coords[2] || 0;
     const deltaLngLat = vec2.sub([], coords, this.unproject(pixel, {targetZ}));
     return {longitude: this.longitude + deltaLngLat[0], latitude: this.latitude + deltaLngLat[1]};
+  }
+
+  /**
+   * Returns camera-relative information about a target in the viewport's rendered world copy.
+   *
+   * The input longitude is not mutated. The returned `target` is a numeric copy whose longitude
+   * is shifted by a multiple of 360 degrees when necessary to address the active repeated world.
+   * Projected coordinates are view-local and do not include this viewport's canvas `x`/`y` offset.
+   * Returns `null` for unsupported projection modes or invalid target coordinates.
+   */
+  getTargetInfo(target: [number, number, number]): WebMercatorTargetInfo | null {
+    if (
+      !this.supportsTargetNavigation ||
+      target.length !== 3 ||
+      !isFiniteArray(target) ||
+      Math.abs(target[1]) >= 90
+    ) {
+      return null;
+    }
+
+    try {
+      const localizedTarget: [number, number, number] = [
+        normalizeLongitude(target[0], this.longitude - this._worldOffset * 360),
+        target[1],
+        target[2]
+      ];
+      const commonPosition = this.projectPosition(localizedTarget);
+      const projectedPosition = this.project(localizedTarget) as [number, number, number];
+      const viewZ =
+        this.viewMatrix[2] * commonPosition[0] +
+        this.viewMatrix[6] * commonPosition[1] +
+        this.viewMatrix[10] * commonPosition[2] +
+        this.viewMatrix[14];
+      const cameraDepth = -viewZ;
+      const projection22 = this.projectionMatrix[10];
+      const projection23 = this.projectionMatrix[14];
+      const near = projection23 / (projection22 - 1);
+      const far = projection23 / (projection22 + 1);
+      // Freeze one isotropic local metric at the target. Web Mercator's local common-space scale
+      // is conformal, so all three axes use the target latitude's meter conversion.
+      const metersPerUnit = 1 / unitsPerMeter(localizedTarget[1]);
+      const targetDistance = Math.hypot(
+        (commonPosition[0] - this.cameraPosition[0]) * metersPerUnit,
+        (commonPosition[1] - this.cameraPosition[1]) * metersPerUnit,
+        (commonPosition[2] - this.cameraPosition[2]) * metersPerUnit
+      );
+      const isFinite =
+        isFiniteArray(commonPosition) &&
+        isFiniteArray(projectedPosition) &&
+        Number.isFinite(cameraDepth) &&
+        Number.isFinite(near) &&
+        Number.isFinite(far) &&
+        Number.isFinite(targetDistance);
+      const hasValidClipRange = isFinite && near > 0 && far > near;
+      const isValid =
+        hasValidClipRange &&
+        cameraDepth > 0 &&
+        projectedPosition[2] > -1 &&
+        projectedPosition[2] < 1;
+      const isVisible =
+        isValid &&
+        projectedPosition[0] >= 0 &&
+        projectedPosition[0] <= this.width &&
+        projectedPosition[1] >= 0 &&
+        projectedPosition[1] <= this.height;
+
+      return {
+        target: localizedTarget,
+        projectedPosition,
+        targetDistance,
+        cameraDepth,
+        near,
+        far,
+        isValid,
+        isVisible
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Reconstructs a canonical perspective map state around a world-space target.
+   *
+   * Call this method on the frozen operation-start viewport. The target is placed at the supplied
+   * view-local screen position, which may be outside the viewport. Its physical camera distance is
+   * multiplied by
+   * `2 ** (sourceZoom - requestedZoom)`, so omitting `zoom` produces a rigid orbit. The active
+   * field of view, padding, clipping configuration, position/model transform, and world copy are
+   * represented by the source viewport and must also be supplied when constructing the result.
+   *
+   * Returns `null` for orthographic or custom projections, nonfinite/singular input, a target
+   * behind or outside the source camera's clip volume, or an unrepresentable map state.
+   */
+  getTargetViewState(
+    options: WebMercatorTargetViewStateOptions
+  ): WebMercatorTargetViewState | null {
+    const {target, screenPosition} = options;
+    const bearing = options.bearing ?? this.bearing;
+    const pitch = options.pitch ?? this.pitch;
+    const zoom = options.zoom ?? this.zoom;
+    if (!isFiniteArray(screenPosition) || !isFiniteArray([bearing, pitch, zoom])) {
+      return null;
+    }
+
+    const targetInfo = this.getTargetInfo(target);
+    if (!targetInfo?.isValid) {
+      return null;
+    }
+
+    try {
+      const commonTarget = this.projectPosition(targetInfo.target);
+      const sceneScale = Math.max(
+        1,
+        ...commonTarget.map(Math.abs),
+        ...this.cameraPosition.map(Math.abs)
+      );
+      const metersPerCommonUnit = 1 / unitsPerMeter(targetInfo.target[1]);
+      const minimumTargetDistance = Math.max(
+        MINIMUM_TARGET_SCALE * sceneScale * Math.abs(metersPerCommonUnit),
+        targetInfo.near * Math.abs(metersPerCommonUnit) * 1e-9
+      );
+      if (
+        !Number.isFinite(metersPerCommonUnit) ||
+        targetInfo.targetDistance <= minimumTargetDistance
+      ) {
+        return null;
+      }
+
+      const scale = Math.pow(2, zoom);
+      if (!Number.isFinite(scale) || scale <= 0 || !Number.isFinite(this.altitude)) {
+        return null;
+      }
+
+      // `pixelUnprojectionMatrix` incorporates the active perspective lens, padding and viewport
+      // dimensions. Transforming an arbitrary point on its pixel ray back into view space removes
+      // the source camera pose and leaves a direction from the camera origin through the requested
+      // pixel. Keeping the source target's camera-space radius while replacing only that direction
+      // preserves physical radius (scaled by zoom below) without retaining the source pixel.
+      const sourceCameraTarget = new Matrix4(this.viewMatrix).transformAsPoint(commonTarget);
+      const sourceCameraRadius = Math.hypot(...sourceCameraTarget);
+      const unprojectedPixel = pixelsToWorld(
+        [screenPosition[0], screenPosition[1], 0.5],
+        this.pixelUnprojectionMatrix
+      );
+      const commonRayPoint = unprojectedPixel.slice(0, 3);
+      const cameraRay = new Matrix4(this.viewMatrix).transformAsPoint(commonRayPoint);
+      const cameraRayLength = Math.hypot(...cameraRay);
+      if (
+        !isFiniteArray(sourceCameraTarget) ||
+        !isFiniteArray(commonRayPoint) ||
+        !isFiniteArray(cameraRay) ||
+        !Number.isFinite(sourceCameraRadius) ||
+        !Number.isFinite(cameraRayLength) ||
+        sourceCameraRadius <= 0 ||
+        cameraRayLength <= 0 ||
+        cameraRay[2] >= 0
+      ) {
+        return null;
+      }
+      const cameraTarget = cameraRay.map(
+        component => (component * sourceCameraRadius) / cameraRayLength
+      );
+      const requestedViewMatrix = new Matrix4(
+        getViewMatrix({
+          height: this.height,
+          pitch,
+          bearing,
+          scale,
+          altitude: this.altitude
+        })
+      );
+      if (!hasStableInverse(requestedViewMatrix)) {
+        return null;
+      }
+      const uncenteredTarget = requestedViewMatrix.invert().transformAsPoint(cameraTarget);
+      const center = [
+        commonTarget[0] + 512 * this._worldOffset - uncenteredTarget[0],
+        commonTarget[1] - uncenteredTarget[1],
+        commonTarget[2] - uncenteredTarget[2]
+      ];
+      if (!isFiniteArray(center)) {
+        return null;
+      }
+
+      const [longitude, latitude] = this.unprojectFlat(center);
+      const unitsPerMeterAtCenter = unitsPerMeter(latitude);
+      if (
+        !isFiniteArray([longitude, latitude, unitsPerMeterAtCenter]) ||
+        Math.abs(latitude) >= 90 ||
+        unitsPerMeterAtCenter <= 0
+      ) {
+        return null;
+      }
+
+      let position: number[] = [0, 0, center[2] / unitsPerMeterAtCenter];
+      if (this.modelMatrix) {
+        const inverseModelMatrix = new Matrix4(this.modelMatrix);
+        if (!hasStableInverse(inverseModelMatrix)) {
+          return null;
+        }
+        position = Array.from(inverseModelMatrix.invert().transformAsVector(position));
+      }
+      if (!isFiniteArray(position)) {
+        return null;
+      }
+
+      return {
+        longitude,
+        latitude,
+        zoom,
+        bearing,
+        pitch,
+        position: position as [number, number, number]
+      };
+    } catch {
+      return null;
+    }
   }
 
   getBounds(options: {z?: number} = {}): [number, number, number, number] {

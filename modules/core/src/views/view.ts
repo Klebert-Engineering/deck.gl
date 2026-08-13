@@ -15,7 +15,7 @@ import type {Parameters} from '@luma.gl/core';
 
 export type CommonViewState = TransitionProps;
 
-export type CommonViewProps<ViewState> = {
+export type CommonViewProps<ViewState, OptionsT extends ControllerOptions = ControllerOptions> = {
   /** A unique id of the view. In a multi-view use case, this is important for matching view states and place contents into this view. */
   id?: string;
   /**
@@ -60,9 +60,14 @@ export type CommonViewProps<ViewState> = {
     | null
     | boolean
     | ConstructorOf<Controller<any>>
-    | (ControllerOptions & {
+    | (OptionsT & {
         type?: ConstructorOf<Controller<any>>;
-      });
+      })
+    | (ControllerOptions &
+        Record<string, unknown> & {
+          /** Custom controller implementation. Additional options are forwarded to this class. */
+          type: ConstructorOf<Controller<any>>;
+        });
 };
 
 export default abstract class View<

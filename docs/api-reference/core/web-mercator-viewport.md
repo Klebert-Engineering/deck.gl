@@ -138,6 +138,23 @@ Returns:
 
 * An object with `{longitude, latitude}` representing the new viewport center.
 
+#### `getTargetInfo` {#gettargetinfo}
+
+Returns camera-relative information for a numeric `[longitude, latitude, altitude]` target. The result contains the target localized to the rendered world copy, its view-local projected position, physical camera distance, camera depth, near and far distances, and two distinct validity fields:
+
+* `isValid` is `true` when the target is finite, in front of the camera, and strictly inside the near/far clip volume.
+* `isVisible` is `true` when the target is valid and its projected x/y position is inside the viewport's pixel bounds.
+
+A target dragged outside the viewport can therefore remain valid even though it is no longer visible. Target acquisition normally requires `isVisible`; an already active target uses `isValid` so offscreen drag and inertia can continue. The method returns `null` when target navigation is unsupported or the input coordinate itself cannot be evaluated. An evaluated coordinate may return a result with both fields set to `false`.
+
+#### `getTargetViewState` {#gettargetviewstate}
+
+Reconstructs a canonical map view state around a numeric target at the requested view-local `screenPosition`. This pixel is independent of the target's position in the source viewport: it may move between calls and may be outside the viewport. The optional `bearing`, `pitch`, and `zoom` fields default to the source viewport. A zoom change scales the physical camera-to-target radius by `2 ** (sourceZoom - requestedZoom)`; changing only bearing or pitch therefore performs a rigid orbit.
+
+Call this method on the operation-start viewport and reuse that viewport for all frames in one interaction. Reconstruct the returned state with the same lens, padding, clipping, model transform, and world-copy configuration before validating it. The method returns `null` when there is no finite supported representation, including a source target behind or outside the clip volume.
+
+The first experimental version supports standard perspective `WebMercatorViewport`. Orthographic mode and custom projection matrices are intentionally unsupported and return `null`. Picking is not performed by this viewport method, so asynchronous/WebGPU picking does not affect the calculation once the application already has a numeric target.
+
 #### `fitBounds` {#fitbounds}
 
 Returns a new viewport that fit around the given bounding box. Viewport `width` and `height` must be either set or provided as options. Only supports non-perspective mode.

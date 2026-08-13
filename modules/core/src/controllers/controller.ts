@@ -124,6 +124,8 @@ export type ControllerProps = {
 
 /** The state of a controller */
 export type InteractionState = {
+  /** Identifier of the view that owns this interaction */
+  viewId?: string;
   /** If the view state is in transition */
   inTransition?: boolean;
   /** If the user is dragging */
@@ -136,6 +138,8 @@ export type InteractionState = {
   isZooming?: boolean;
   /** World coordinate [lng, lat, altitude] of rotation pivot point when rotating */
   rotationPivotPosition?: [number, number, number];
+  /** Numeric world coordinate [lng, lat, altitude] anchoring the active interaction */
+  interactionTargetPosition?: [number, number, number];
 };
 
 /** Parameters passed to the onViewStateChange callback */
@@ -148,8 +152,6 @@ export type ViewStateChangeParameters<ViewStateT = any> = {
   /** The current view state */
   oldViewState?: ViewStateT;
 };
-
-const pinchEventWorkaround: any = {};
 
 export default abstract class Controller<ControllerState extends IViewState<ControllerState>> {
   abstract get ControllerState(): ConstructorOf<ControllerState>;
@@ -166,7 +168,7 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
   protected makeViewport: (opts: Record<string, any>) => Viewport;
   protected pickPosition?: (x: number, y: number) => {coordinate?: number[]} | null;
 
-  private _controllerState?: ControllerState;
+  protected _controllerState?: ControllerState;
   private _events: Record<string, boolean> = {};
   private _interactionState: InteractionState = {
     isDragging: false
@@ -177,7 +179,10 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
   private _multiPanMode: 'pan' | 'rotate' | null = null;
   private _multiPanStartCenter: {x: number; y: number} | null = null;
   private _doubleClickDragAnchor: [number, number] | null = null;
-  private _suppressDoubleClickUntil: number = 0;
+  /** Input samples shared by pinch handlers and specialized map-controller implementations. */
+  protected _startPinchRotation: number | null = null;
+  protected _lastPinchEvent: MjolnirGestureEvent | null = null;
+  protected _suppressDoubleClickUntil: number = 0;
 
   protected invertPan: boolean = false;
   protected dragMode: 'pan' | 'rotate' = 'rotate';
@@ -240,6 +245,10 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
   }
 
   finalize() {
+    if (this._eventStartBlocked !== null) {
+      clearTimeout(this._eventStartBlocked);
+      this._eventStartBlocked = null;
+    }
     for (const eventName in this._events) {
       if (this._events[eventName]) {
         // @ts-ignore (2345) event type string cannot be assifned to enum
@@ -343,6 +352,9 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
   // Calling this method will temporarily disable *start events to avoid conflicting transitions.
   blockEvents(timeout: number): void {
     /* global setTimeout */
+    if (this._eventStartBlocked !== null) {
+      clearTimeout(this._eventStartBlocked);
+    }
     const timer = setTimeout(() => {
       if (this._eventStartBlocked === timer) {
         this._eventStartBlocked = null;
@@ -363,6 +375,9 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     }
     const oldProps = this.props;
     this.props = props;
+    // Controlled view-state feedback may call setProps synchronously from onViewStateChange.
+    // Do not keep exposing a controller state built from the preceding props.
+    this._controllerState = undefined;
 
     if (!('transitionInterpolator' in props)) {
       // Add default transition interpolator
@@ -472,15 +487,19 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     const viewState = {...newControllerState.getViewportProps(), ...extraProps};
 
     // TODO - to restore diffing, we need to include interactionState
-    const changed = this.controllerState !== newControllerState;
+    const oldControllerState = this.controllerState;
+    const changed = oldControllerState !== newControllerState;
+    const oldViewState = oldControllerState?.getViewportProps();
     // const oldViewState = this.controllerState.getViewportProps();
     // const changed = Object.keys(viewState).some(key => oldViewState[key] !== viewState[key]);
 
     this.state = newControllerState.getState();
+    // Expose the state just emitted by this synchronous event. A controlled setProps callback
+    // will invalidate this cache again and replace it with the accepted external state.
+    this._controllerState = newControllerState;
     this._setInteractionState(interactionState);
 
     if (changed) {
-      const oldViewState = this.controllerState && this.controllerState.getViewportProps();
       if (this.onViewStateChange) {
         this.onViewStateChange({
           viewState,
@@ -496,6 +515,7 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     viewState: Record<string, any>;
     oldViewState: Record<string, any>;
   }) {
+    this._interactionState.viewId = this.props.id;
     this.onViewStateChange({
       ...params,
       interactionState: this._interactionState,
@@ -503,8 +523,8 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     });
   }
 
-  private _setInteractionState(newStates: InteractionState) {
-    Object.assign(this._interactionState, newStates);
+  protected _setInteractionState(newStates: InteractionState) {
+    Object.assign(this._interactionState, newStates, {viewId: this.props.id});
     this.onStateChange(this._interactionState);
   }
 
@@ -827,8 +847,8 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
       .zoomStart({pos}, this._getConstraintContext('zoom', 'start'))
       .rotateStart({pos}, this._getConstraintContext('rotate', 'start'));
     // hack - hammer's `rotation` field doesn't seem to produce the correct angle
-    pinchEventWorkaround._startPinchRotation = event.rotation;
-    pinchEventWorkaround._lastPinchEvent = event;
+    this._startPinchRotation = event.rotation;
+    this._lastPinchEvent = event;
     this.updateViewport(newControllerState, NO_TRANSITION_PROPS, {isDragging: true});
     return true;
   }
@@ -854,7 +874,7 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     if (this.touchRotate) {
       const {rotation} = event;
       newControllerState = newControllerState.rotate(
-        {deltaAngleX: pinchEventWorkaround._startPinchRotation - rotation},
+        {deltaAngleX: (this._startPinchRotation || 0) - rotation},
         this._getConstraintContext('rotate', 'update')
       );
     }
@@ -865,7 +885,7 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
       isZooming: this.touchZoom,
       isRotating: this.touchRotate
     });
-    pinchEventWorkaround._lastPinchEvent = event;
+    this._lastPinchEvent = event;
     return true;
   }
 
@@ -874,7 +894,7 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
       return false;
     }
     const {inertia} = this;
-    const {_lastPinchEvent} = pinchEventWorkaround;
+    const {_lastPinchEvent} = this;
     if (this.touchZoom && inertia && _lastPinchEvent && event.scale !== _lastPinchEvent.scale) {
       const pos = this.getCenter(event);
       let newControllerState = this.controllerState.rotateEnd();
@@ -917,8 +937,8 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
         isRotating: Boolean(reboundTransition) && this.touchRotate
       });
     }
-    pinchEventWorkaround._startPinchRotation = null;
-    pinchEventWorkaround._lastPinchEvent = null;
+    this._startPinchRotation = null;
+    this._lastPinchEvent = null;
     return true;
   }
 

@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) vis.gl contributors
 
-import {test, expect} from 'vitest';
-import {MapView} from '@deck.gl/core';
+import {test, expect, vi} from 'vitest';
+import {MapView, TerrainController} from '@deck.gl/core';
 import ViewManager from '@deck.gl/core/lib/view-manager';
 import {equals} from '@math.gl/core';
 import {EventManager} from 'mjolnir.js';
@@ -169,6 +169,29 @@ test('ViewManager#controllers', () => {
     viewManager.controllers.main || viewManager.controllers.minimap,
     'controllers are deleted'
   ).toBeFalsy();
+});
+
+test('ViewManager finalizes a controller before replacing its class for the same view id', () => {
+  const mapView = new MapView({id: 'main', controller: true});
+  const viewManager = new ViewManager({
+    views: [mapView],
+    viewState: {longitude: -122, latitude: 38, zoom: 12},
+    width: 100,
+    height: 100
+  });
+  const oldController = viewManager.controllers.main;
+  const finalize = vi.spyOn(oldController, 'finalize');
+
+  viewManager.setProps({
+    views: [new MapView({id: 'main', controller: {type: TerrainController}})]
+  });
+
+  expect(viewManager.controllers.main).not.toBe(oldController);
+  expect(viewManager.controllers.main).toBeInstanceOf(TerrainController);
+  expect(finalize).toHaveBeenCalledTimes(1);
+
+  viewManager.finalize();
+  expect(finalize).toHaveBeenCalledTimes(1);
 });
 
 test('ViewManager#update view props', () => {

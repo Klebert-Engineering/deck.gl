@@ -74,6 +74,10 @@ Called by the view when the view state updates. This method handles adding/remov
 
 Called by the event handlers, this method updates internal state, and invokes `onViewStateChange` callback with a new map state.
 
+#### `updateTransition()` {#updatetransition}
+
+Advances an active controller transition to the current timeline time. Deck calls this method from its render loop. Controller-specific camera policies may run synchronously for every intermediate frame; for example, experimental `MapController` target navigation invokes its target-view-state constraint here. Callback exceptions are not swallowed by the controller.
+
 #### `getCenter(event)` {#getcenter}
 
 Utility used by the event handlers, returns pointer position `[x, y]` from any event.

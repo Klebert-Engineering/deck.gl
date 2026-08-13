@@ -1,0 +1,143 @@
+// deck.gl
+// SPDX-License-Identifier: MIT
+// Copyright (c) vis.gl contributors
+
+import {describe, expect, it, vi} from 'vitest';
+import TargetNavigationInterpolator from '@deck.gl/core/transitions/target-navigation-interpolator';
+
+import type {
+  ResolveTargetNavigationTransitionFrame,
+  TargetNavigationTransitionContext
+} from '@deck.gl/core/transitions/target-navigation-interpolator';
+
+const START_PROPS = {
+  longitude: 10,
+  latitude: 20,
+  zoom: 10,
+  bearing: 0,
+  pitch: 20,
+  position: [0, 0, 0]
+};
+
+const END_PROPS = {
+  longitude: 14,
+  latitude: 24,
+  zoom: 12,
+  bearing: 80,
+  pitch: 40,
+  position: [4, 8, 12]
+};
+
+describe('TargetNavigationInterpolator', () => {
+  it('carries a frozen numeric target and uses the deterministic radius curve', () => {
+    const coordinate: [number, number, number] = [11.25, 47.75, 125];
+    const screenPosition: [number, number] = [320, 240];
+    const sourceTarget = {coordinate, screenPosition, featureId: 'application-only'};
+    const contexts: TargetNavigationTransitionContext[] = [];
+    const resolveFrame = vi.fn(
+      (props: Readonly<Record<string, any>>, context: TargetNavigationTransitionContext) => {
+        contexts.push(context);
+        return {...props, acceptedRadius: context.radius};
+      }
+    );
+    const interpolator = new TargetNavigationInterpolator({
+      target: sourceTarget,
+      startRadius: 100,
+      endScreenPosition: [420, 340],
+      resolveFrame
+    });
+
+    coordinate[0] = 0;
+    screenPosition[0] = 0;
+
+    const {start, end} = interpolator.initializeProps(START_PROPS, END_PROPS);
+    expect(resolveFrame).not.toHaveBeenCalled();
+
+    const initial = interpolator.interpolateProps(start, end, 0);
+    expect(resolveFrame).not.toHaveBeenCalled();
+    const quarter = interpolator.interpolateProps(start, end, 0.25);
+    const half = interpolator.interpolateProps(start, end, 0.5);
+    const threeQuarters = interpolator.interpolateProps(start, end, 0.75);
+
+    expect(initial).toMatchObject(START_PROPS);
+    expect(quarter).toMatchObject({
+      longitude: 11,
+      latitude: 21,
+      zoom: 10.5,
+      bearing: 20,
+      pitch: 25,
+      position: [1, 2, 3],
+      acceptedRadius: 100 * 2 ** -0.5
+    });
+    expect(half).toMatchObject({zoom: 11, acceptedRadius: 50});
+    expect(threeQuarters).toMatchObject({zoom: 11.5, acceptedRadius: 100 * 2 ** -1.5});
+
+    expect(resolveFrame).toHaveBeenCalledTimes(3);
+    expect(contexts.map(context => context.progress)).toEqual([0.25, 0.5, 0.75]);
+    expect(contexts.map(context => context.screenPosition)).toEqual([
+      [345, 265],
+      [370, 290],
+      [395, 315]
+    ]);
+    expect(Object.isFrozen(contexts[1].screenPosition)).toBe(true);
+    expect(contexts[1].target).toEqual({
+      coordinate: [11.25, 47.75, 125],
+      screenPosition: [320, 240]
+    });
+    expect(Object.isFrozen(contexts[1].target)).toBe(true);
+    expect(Object.isFrozen(contexts[1].target.coordinate)).toBe(true);
+    expect(Object.isFrozen(contexts[1].target.screenPosition)).toBe(true);
+    expect(contexts[0].previousProps).toEqual(start);
+    expect(Object.isFrozen(contexts[0].previousProps)).toBe(true);
+    expect(Object.isFrozen(contexts[0].previousProps.position)).toBe(true);
+    expect('featureId' in contexts[1].target).toBe(false);
+  });
+
+  it('retains the exact previous valid frame on no solution and resumes afterwards', () => {
+    let callbackResult: Record<string, any> | null = null;
+    const resolveFrame: ResolveTargetNavigationTransitionFrame = (props, {progress}) => {
+      if (progress === 0.5) {
+        return null;
+      }
+      callbackResult = {...props, acceptedAt: progress};
+      return callbackResult;
+    };
+    const interpolator = new TargetNavigationInterpolator({
+      target: {coordinate: [11.25, 47.75, 125], screenPosition: [320, 240]},
+      startRadius: 100,
+      resolveFrame
+    });
+    const {start, end} = interpolator.initializeProps(START_PROPS, END_PROPS);
+
+    const quarter = interpolator.interpolateProps(start, end, 0.25);
+    expect(quarter).not.toBe(callbackResult);
+
+    const rejectedHalf = interpolator.interpolateProps(start, end, 0.5);
+    expect(rejectedHalf).toBe(quarter);
+
+    const threeQuarters = interpolator.interpolateProps(start, end, 0.75);
+    expect(threeQuarters).not.toBe(quarter);
+    expect(threeQuarters).toMatchObject({zoom: 11.5, acceptedAt: 0.75});
+  });
+
+  it('uses the canonical start state without resolving the redundant t=0 frame', () => {
+    const resolveFrame = vi.fn(() => null);
+    const interpolator = new TargetNavigationInterpolator({
+      target: {coordinate: [11.25, 47.75, 125], screenPosition: [320, 240]},
+      startRadius: 100,
+      resolveFrame
+    });
+    const {start, end} = interpolator.initializeProps(START_PROPS, END_PROPS);
+    expect(resolveFrame).not.toHaveBeenCalled();
+
+    const rejectedStartFrame = interpolator.interpolateProps(start, end, 0);
+    const firstRejectedFrame = interpolator.interpolateProps(start, end, 0.25);
+    const secondRejectedFrame = interpolator.interpolateProps(start, end, 0.5);
+
+    expect(resolveFrame).toHaveBeenCalledTimes(2);
+    expect(rejectedStartFrame).toEqual(start);
+    expect(rejectedStartFrame).not.toBe(start);
+    expect(firstRejectedFrame).toBe(rejectedStartFrame);
+    expect(secondRejectedFrame).toBe(firstRejectedFrame);
+  });
+});

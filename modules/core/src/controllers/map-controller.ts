@@ -3,7 +3,11 @@
 // Copyright (c) vis.gl contributors
 
 import {clamp} from '@math.gl/core';
-import Controller, {ControllerProps, InteractionState} from './controller';
+import Controller, {
+  type ControllerOptions,
+  type ControllerProps,
+  type InteractionState
+} from './controller';
 import ViewState, {
   CONSTRAINT_AROUND,
   type ConstraintAround,
@@ -13,9 +17,18 @@ import {applyRubberBand, getMaxBoundsExtents, getMaxBoundsRect} from './utils';
 import {worldToLngLat, lngLatToWorld as _lngLatToWorld} from '@math.gl/web-mercator';
 import assert from '../utils/assert';
 import {mod} from '../utils/math-utils';
+import {deepEqual} from '../utils/deep-equal';
+import type {MjolnirEvent} from 'mjolnir.js';
 
 import LinearInterpolator from '../transitions/linear-interpolator';
+import TargetNavigationInterpolator, {
+  type TargetNavigationTransitionContext
+} from '../transitions/target-navigation-interpolator';
 import type Viewport from '../viewports/viewport';
+import WebMercatorViewport, {
+  type WebMercatorTargetInfo,
+  type WebMercatorTargetViewState
+} from '../viewports/web-mercator-viewport';
 
 const PITCH_MOUSE_THRESHOLD = 5;
 const PITCH_ACCEL = 1.2;
@@ -25,6 +38,129 @@ const WEB_MERCATOR_MAX_BOUNDS = [
   [Infinity, 90]
 ] satisfies ControllerProps['maxBounds'];
 const ZOOM_RUBBER_BAND_RANGE = 1;
+const TARGET_PIXEL_TOLERANCE = 0.1;
+const TARGET_RADIUS_ABSOLUTE_TOLERANCE = 0.01;
+const TARGET_RADIUS_RELATIVE_TOLERANCE = 1e-7;
+const TARGET_NEAR_RELATIVE_EPSILON = 1e-6;
+const TARGET_WHEEL_RELEASE_MS = 150;
+
+type InternalMapControllerProps = ControllerProps &
+  MapStateProps & {
+    rotationPivot?: 'center' | '2d' | '3d';
+    getAltitude?: (pos: [number, number]) => number | undefined;
+    _targetNavigation?: boolean;
+    getInteractionTarget?: GetMapInteractionTarget;
+    constrainInteractionTargetViewState?: ConstrainMapInteractionTargetViewState;
+    /** ViewManager-owned definition. Kept out of the exported controller contract. */
+    _view?: {constructor: unknown; props?: Record<string, any>};
+  };
+
+type TargetViewStructure = {
+  type: unknown;
+  padding: unknown;
+  repeat: unknown;
+  nearZMultiplier: unknown;
+  farZMultiplier: unknown;
+  nearZ: unknown;
+  farZ: unknown;
+  projectionMatrix: number[] | null;
+  fovy: unknown;
+  altitude: unknown;
+  orthographic: unknown;
+  modelMatrix: number[] | null;
+  worldOffset: unknown;
+};
+
+function getTargetViewStructure(props: InternalMapControllerProps): TargetViewStructure | null {
+  const view = props._view;
+  if (!view) {
+    return null;
+  }
+  const viewProps = view.props || {};
+  const projectionMatrix = viewProps.projectionMatrix;
+  const modelMatrix = viewProps.modelMatrix ?? props['modelMatrix'];
+  return {
+    type: view.constructor,
+    padding: viewProps.padding ? {...viewProps.padding} : null,
+    repeat: viewProps.repeat ?? false,
+    nearZMultiplier: viewProps.nearZMultiplier ?? props['nearZMultiplier'] ?? 0.1,
+    farZMultiplier: viewProps.farZMultiplier ?? props['farZMultiplier'] ?? 1.01,
+    nearZ: viewProps.nearZ ?? props['nearZ'] ?? null,
+    farZ: viewProps.farZ ?? props['farZ'] ?? null,
+    projectionMatrix: projectionMatrix ? Array.from(projectionMatrix) : null,
+    fovy: viewProps.fovy ?? props['fovy'] ?? null,
+    altitude: viewProps.altitude ?? props.altitude ?? 1.5,
+    orthographic: viewProps.orthographic ?? false,
+    modelMatrix: modelMatrix ? Array.from(modelMatrix) : null,
+    worldOffset: viewProps.worldOffset ?? props['worldOffset'] ?? 0
+  };
+}
+
+/** A numeric world coordinate and its view-local screen position. */
+export type MapInteractionTarget = {
+  coordinate: [longitude: number, latitude: number, altitude: number];
+  screenPosition: [x: number, y: number];
+};
+
+/** Target-anchored map operation being acquired. */
+export type MapInteractionTargetOperation = 'pan' | 'zoom' | 'rotate' | 'pinch';
+
+/** Input source that initiated target acquisition. */
+export type MapInteractionTargetSource = 'pointer' | 'touch' | 'wheel' | 'doubleClick' | 'keyboard';
+
+/** Context supplied to an application's synchronous target provider. */
+export type MapInteractionTargetContext = {
+  /** Identifier of the view/controller that owns the interaction. */
+  viewId: string;
+  /** Camera operation being initiated. */
+  operation: MapInteractionTargetOperation;
+  /** Input source that initiated the operation. */
+  source: MapInteractionTargetSource;
+  /** View-local CSS-pixel position, or `null` for pointerless input. */
+  screenPosition: [number, number] | null;
+  /** Active immutable Web Mercator viewport. */
+  viewport: WebMercatorViewport;
+};
+
+/** Synchronously resolves a fresh numeric target for the current rendered scene. */
+export type GetMapInteractionTarget = (
+  context: Readonly<MapInteractionTargetContext>
+) => MapInteractionTarget | null;
+
+/** Context supplied before core validates a target-relative camera candidate. */
+export type MapInteractionTargetViewStateContext = {
+  /** Identifier of the view/controller that owns the frozen target. */
+  viewId: string;
+  /** Operation that acquired the frozen target. */
+  operation: MapInteractionTargetOperation;
+  /** Input source that acquired the frozen target. */
+  source: MapInteractionTargetSource;
+  /** Frozen coordinate and desired view-local pixel for this candidate. */
+  target: Readonly<MapInteractionTarget>;
+  /** Frozen viewport from which this target-relative operation is measured. */
+  sourceViewport: WebMercatorViewport;
+  /** Last accepted canonical camera state. */
+  currentViewState: Readonly<WebMercatorTargetViewState>;
+  /** Direct-inverse candidate before ordinary map constraints and final validation. */
+  requestedViewState: Readonly<WebMercatorTargetViewState>;
+};
+
+/** Optionally replaces a direct target-relative camera candidate before core validation. */
+export type ConstrainMapInteractionTargetViewState = (
+  context: Readonly<MapInteractionTargetViewStateContext>
+) => WebMercatorTargetViewState | null;
+
+/** Options understood by {@link MapController}. */
+export type MapControllerOptions = ControllerOptions & {
+  /** Rotation pivot behavior. Default `'center'`. */
+  rotationPivot?: 'center' | '2d' | '3d';
+  /** Enable experimental target-relative 3D navigation. Default `false`. */
+  _targetNavigation?: boolean;
+  /** Resolve an application-defined numeric interaction target synchronously. */
+  getInteractionTarget?: GetMapInteractionTarget;
+  /** Apply an application policy before core constraints and target validation. */
+  constrainInteractionTargetViewState?: ConstrainMapInteractionTargetViewState;
+};
 
 /** The web mercator utility `lngLatToWorld` throws if invalid coordinates are provided.
  * This wrapper clamps user input to calculate common positions safely. */
@@ -38,6 +174,39 @@ function lngLatToWorld([lng, lat]: number[]): number[] {
   }
   const [, y] = _lngLatToWorld([0, lat]);
   return [lng, clamp(y, 0, WEB_MERCATOR_TILE_SIZE)];
+}
+
+function copyTargetViewState(value: WebMercatorTargetViewState): WebMercatorTargetViewState | null {
+  if (
+    !value ||
+    !Number.isFinite(value.longitude) ||
+    !Number.isFinite(value.latitude) ||
+    !Number.isFinite(value.zoom) ||
+    !Number.isFinite(value.bearing) ||
+    !Number.isFinite(value.pitch) ||
+    !Array.isArray(value.position) ||
+    value.position.length !== 3 ||
+    !value.position.every(Number.isFinite)
+  ) {
+    return null;
+  }
+  return {
+    longitude: value.longitude,
+    latitude: value.latitude,
+    zoom: value.zoom,
+    bearing: value.bearing,
+    pitch: value.pitch,
+    position: [...value.position]
+  };
+}
+
+function freezeTargetViewState(
+  value: WebMercatorTargetViewState
+): Readonly<WebMercatorTargetViewState> {
+  return Object.freeze({
+    ...value,
+    position: Object.freeze([...value.position]) as unknown as [number, number, number]
+  });
 }
 
 export type MapStateProps = {
@@ -96,6 +265,24 @@ export type MapStateInternal = {
   startPitch?: number;
   /** Zoom when current zoom operation started */
   startZoom?: number;
+  /** Numeric target snapshot retained by the active target-navigation session. */
+  interactionTarget?: MapInteractionTarget;
+  /** Canonical map state at target acquisition. */
+  targetNavigationStartProps?: Required<MapStateProps>;
+  /** Immutable perspective viewport at target acquisition. */
+  targetNavigationStartViewport?: WebMercatorViewport;
+  /** Immutable target metrics measured at acquisition. */
+  targetNavigationStartTargetInfo?: Readonly<WebMercatorTargetInfo>;
+  /** Controller-owned identity of the active target session. */
+  targetNavigationSessionId?: number;
+  /** Target's desired view-local screen position in the most recent accepted state. */
+  targetNavigationScreenPosition?: [number, number];
+  /** Constraint callback frozen for the active target session. */
+  targetNavigationConstraint?: ConstrainMapInteractionTargetViewState;
+  /** View and input identity frozen for the active target session. */
+  targetNavigationViewId?: string;
+  targetNavigationOperation?: MapInteractionTargetOperation;
+  targetNavigationSource?: MapInteractionTargetSource;
 };
 
 /* Utils */
@@ -162,6 +349,23 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
       startPitch,
       /** Zoom when current zoom operation started */
       startZoom,
+      /** Numeric target snapshot retained by the active target-navigation session */
+      interactionTarget,
+      /** Canonical map state at target acquisition */
+      targetNavigationStartProps,
+      /** Perspective viewport and target metrics frozen at acquisition */
+      targetNavigationStartViewport,
+      targetNavigationStartTargetInfo,
+      /** Controller-owned identity of the active target session */
+      targetNavigationSessionId,
+      /** Target's desired pixel in the most recent accepted state */
+      targetNavigationScreenPosition,
+      /** Application candidate policy frozen for this target session */
+      targetNavigationConstraint,
+      /** View and input identity frozen for this target session */
+      targetNavigationViewId,
+      targetNavigationOperation,
+      targetNavigationSource,
 
       /** Normalize viewport props to fit map height into viewport */
       normalize = true,
@@ -204,13 +408,89 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
         startRotateLngLat,
         startBearing,
         startPitch,
-        startZoom
+        startZoom,
+        interactionTarget,
+        targetNavigationStartProps,
+        targetNavigationStartViewport,
+        targetNavigationStartTargetInfo,
+        targetNavigationSessionId,
+        targetNavigationScreenPosition,
+        targetNavigationConstraint,
+        targetNavigationViewId,
+        targetNavigationOperation,
+        targetNavigationSource
       },
       options.makeViewport,
       options.constraintContext
     );
 
     this.getAltitude = options.getAltitude;
+  }
+
+  /** Returns a state carrying one immutable numeric interaction target. */
+  withInteractionTarget(
+    target: MapInteractionTarget,
+    session?: {
+      viewId: string;
+      operation: MapInteractionTargetOperation;
+      source: MapInteractionTargetSource;
+      sessionId: number;
+      constrainViewState?: ConstrainMapInteractionTargetViewState;
+    }
+  ): MapState {
+    const coordinate = Object.freeze([...target.coordinate]) as unknown as [number, number, number];
+    const screenPosition = Object.freeze([...target.screenPosition]) as unknown as [number, number];
+    const interactionTarget = Object.freeze({coordinate, screenPosition}) as MapInteractionTarget;
+    const targetNavigationStartViewport = this._getTargetViewport() || undefined;
+    const startTargetInfo = targetNavigationStartViewport?.getTargetInfo(coordinate);
+    const targetNavigationStartTargetInfo = startTargetInfo
+      ? Object.freeze({
+          ...startTargetInfo,
+          target: Object.freeze([...startTargetInfo.target]) as [number, number, number],
+          projectedPosition: Object.freeze([...startTargetInfo.projectedPosition]) as [
+            number,
+            number,
+            number
+          ]
+        })
+      : undefined;
+    return this._getUpdatedState({
+      interactionTarget,
+      targetNavigationStartProps: {...this.getViewportProps()},
+      targetNavigationStartViewport,
+      targetNavigationStartTargetInfo,
+      targetNavigationSessionId: session?.sessionId,
+      targetNavigationScreenPosition: [...screenPosition],
+      targetNavigationConstraint: session?.constrainViewState,
+      targetNavigationViewId: session?.viewId,
+      targetNavigationOperation: session?.operation,
+      targetNavigationSource: session?.source
+    });
+  }
+
+  /** Returns a state without transient target-navigation bookkeeping. */
+  withoutInteractionTarget(): MapState {
+    return this._getUpdatedState({
+      // A target session owns these gesture starts. Keeping any of them after a forced
+      // cancellation would let a later stock move continue around the released 3D coordinate.
+      startPanLngLat: null,
+      startZoomLngLat: null,
+      startZoom: null,
+      startRotatePos: null,
+      startRotateLngLat: null,
+      startBearing: null,
+      startPitch: null,
+      interactionTarget: null,
+      targetNavigationStartProps: null,
+      targetNavigationStartViewport: null,
+      targetNavigationStartTargetInfo: null,
+      targetNavigationSessionId: null,
+      targetNavigationScreenPosition: null,
+      targetNavigationConstraint: null,
+      targetNavigationViewId: null,
+      targetNavigationOperation: null,
+      targetNavigationSource: null
+    });
   }
 
   /**
@@ -236,6 +516,11 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
     {pos, startPos}: {pos: [number, number]; startPos?: [number, number]},
     constraintContext?: ConstraintContext
   ): MapState {
+    const interactionTarget = this.getState().interactionTarget;
+    if (interactionTarget) {
+      return this._getTargetPoseUpdatedState({}, constraintContext, undefined, pos);
+    }
+
     const startPanLngLat = this.getState().startPanLngLat || this._unproject(startPos);
 
     if (!startPanLngLat) {
@@ -265,30 +550,50 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
    * Start rotating
    * @param {[Number, Number]} pos - position on screen where the center is
    */
-  rotateStart({pos}: {pos: [number, number]}): MapState {
+  rotateStart({pos}: {pos: [number, number]}, constraintContext?: ConstraintContext): MapState {
+    const interactionTarget = this.getState().interactionTarget;
+    if (interactionTarget) {
+      const targetInfo = this._getTargetViewport()?.getTargetInfo(interactionTarget.coordinate);
+      return this._getUpdatedState(
+        {
+          startRotatePos: pos,
+          startRotateLngLat: targetInfo?.target || interactionTarget.coordinate,
+          startBearing: this.getViewportProps().bearing,
+          startPitch: this.getViewportProps().pitch
+        },
+        constraintContext
+      );
+    }
+
     const altitude = this.getAltitude?.(pos);
 
-    return this._getUpdatedState({
-      startRotatePos: pos,
-      startRotateLngLat: altitude !== undefined ? this._unproject3D(pos, altitude) : undefined,
-      startBearing: this.getViewportProps().bearing,
-      startPitch: this.getViewportProps().pitch
-    });
+    return this._getUpdatedState(
+      {
+        startRotatePos: pos,
+        startRotateLngLat: altitude !== undefined ? this._unproject3D(pos, altitude) : undefined,
+        startBearing: this.getViewportProps().bearing,
+        startPitch: this.getViewportProps().pitch
+      },
+      constraintContext
+    );
   }
 
   /**
    * Rotate
    * @param {[Number, Number]} pos - position on screen where the center is
    */
-  rotate({
-    pos,
-    deltaAngleX = 0,
-    deltaAngleY = 0
-  }: {
-    pos?: [number, number];
-    deltaAngleX?: number;
-    deltaAngleY?: number;
-  }): MapState {
+  rotate(
+    {
+      pos,
+      deltaAngleX = 0,
+      deltaAngleY = 0
+    }: {
+      pos?: [number, number];
+      deltaAngleX?: number;
+      deltaAngleY?: number;
+    },
+    constraintContext?: ConstraintContext
+  ): MapState {
     const {startRotatePos, startRotateLngLat, startBearing, startPitch} = this.getState();
 
     if (!startRotatePos || startBearing === undefined || startPitch === undefined) {
@@ -306,32 +611,41 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
 
     // If we have a pivot point, adjust the camera position to keep the pivot point fixed
     if (startRotateLngLat) {
+      if (this.getState().interactionTarget) {
+        return this._getTargetPoseUpdatedState(newRotation, constraintContext);
+      }
       const rotatedViewport = this.makeViewport({
         ...this.getViewportProps(),
         ...newRotation
       });
       // Use panByPosition3D if available (WebMercatorViewport), otherwise fall back to panByPosition
       const panMethod = 'panByPosition3D' in rotatedViewport ? 'panByPosition3D' : 'panByPosition';
-      return this._getUpdatedState({
-        ...newRotation,
-        ...rotatedViewport[panMethod](startRotateLngLat, startRotatePos)
-      });
+      return this._getUpdatedState(
+        {
+          ...newRotation,
+          ...rotatedViewport[panMethod](startRotateLngLat, startRotatePos)
+        },
+        constraintContext
+      );
     }
 
-    return this._getUpdatedState(newRotation);
+    return this._getUpdatedState(newRotation, constraintContext);
   }
 
   /**
    * End rotating
    * Must call if `rotateStart()` was called
    */
-  rotateEnd(): MapState {
-    return this._getUpdatedState({
-      startRotatePos: null,
-      startRotateLngLat: null,
-      startBearing: null,
-      startPitch: null
-    });
+  rotateEnd(constraintContext?: ConstraintContext): MapState {
+    return this._getUpdatedState(
+      {
+        startRotatePos: null,
+        startRotateLngLat: null,
+        startBearing: null,
+        startPitch: null
+      },
+      constraintContext
+    );
   }
 
   /**
@@ -371,6 +685,12 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
     // Make sure we zoom around the current mouse position rather than map center
     let {startZoom, startZoomLngLat} = this.getState();
 
+    if (this.getState().interactionTarget) {
+      startZoom ??= this.getViewportProps().zoom;
+      const zoom = this._constrainZoom(startZoom + Math.log2(scale));
+      return this._getTargetPoseUpdatedState({zoom}, constraintContext);
+    }
+
     if (!startZoomLngLat) {
       // We have two modes of zoom:
       // scroll zoom that are discrete events (transform from the current zoom level),
@@ -389,6 +709,34 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
       {
         zoom: (startZoom as number) + Math.log2(scale),
         [CONSTRAINT_AROUND]: {position: startZoomLngLat, screenPosition: pos}
+      },
+      constraintContext
+    );
+  }
+
+  /** Applies the zoom and rotation components of one compound target gesture in one solve. */
+  zoomRotate(
+    {
+      scale,
+      deltaAngleX = 0,
+      deltaAngleY = 0
+    }: {scale: number; deltaAngleX?: number; deltaAngleY?: number},
+    constraintContext?: ConstraintContext
+  ): MapState {
+    const {interactionTarget, startZoom, startBearing, startPitch} = this.getState();
+    if (
+      !interactionTarget ||
+      startZoom === undefined ||
+      startBearing === undefined ||
+      startPitch === undefined
+    ) {
+      return this;
+    }
+    return this._getTargetPoseUpdatedState(
+      {
+        zoom: this._constrainZoom(startZoom + Math.log2(scale)),
+        bearing: startBearing + deltaAngleX,
+        pitch: startPitch + deltaAngleY
       },
       constraintContext
     );
@@ -432,28 +780,32 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
     return this._panFromCenter([0, -speed], constraintContext);
   }
 
-  rotateLeft(speed: number = 15): MapState {
-    return this._getUpdatedState({
-      bearing: this.getViewportProps().bearing - speed
-    });
+  rotateLeft(speed: number = 15, constraintContext?: ConstraintContext): MapState {
+    const bearing = this.getViewportProps().bearing - speed;
+    return this.getState().interactionTarget
+      ? this._getTargetPoseUpdatedState({bearing}, constraintContext)
+      : this._getUpdatedState({bearing}, constraintContext);
   }
 
-  rotateRight(speed: number = 15): MapState {
-    return this._getUpdatedState({
-      bearing: this.getViewportProps().bearing + speed
-    });
+  rotateRight(speed: number = 15, constraintContext?: ConstraintContext): MapState {
+    const bearing = this.getViewportProps().bearing + speed;
+    return this.getState().interactionTarget
+      ? this._getTargetPoseUpdatedState({bearing}, constraintContext)
+      : this._getUpdatedState({bearing}, constraintContext);
   }
 
-  rotateUp(speed: number = 10): MapState {
-    return this._getUpdatedState({
-      pitch: this.getViewportProps().pitch + speed
-    });
+  rotateUp(speed: number = 10, constraintContext?: ConstraintContext): MapState {
+    const pitch = this.getViewportProps().pitch + speed;
+    return this.getState().interactionTarget
+      ? this._getTargetPoseUpdatedState({pitch}, constraintContext)
+      : this._getUpdatedState({pitch}, constraintContext);
   }
 
-  rotateDown(speed: number = 10): MapState {
-    return this._getUpdatedState({
-      pitch: this.getViewportProps().pitch - speed
-    });
+  rotateDown(speed: number = 10, constraintContext?: ConstraintContext): MapState {
+    const pitch = this.getViewportProps().pitch - speed;
+    return this.getState().interactionTarget
+      ? this._getTargetPoseUpdatedState({pitch}, constraintContext)
+      : this._getUpdatedState({pitch}, constraintContext);
   }
 
   shortestPathFrom(viewState: MapState): MapStateProps {
@@ -479,7 +831,6 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
     const internalProps = props as typeof props & ConstraintAround;
     const constraintAround = internalProps[CONSTRAINT_AROUND];
     delete internalProps[CONSTRAINT_AROUND];
-
     // Ensure pitch is within specified range
     const {maxPitch, minPitch, pitch, bearing, normalize, maxBounds, rubberBand} = props;
 
@@ -600,6 +951,10 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
   }
 
   _zoomFromCenter(scale, constraintContext?: ConstraintContext) {
+    const targetScreenPosition = this.getState().targetNavigationScreenPosition;
+    if (this.getState().interactionTarget && targetScreenPosition) {
+      return this.zoom({pos: targetScreenPosition, scale}, constraintContext);
+    }
     const {width, height} = this.getViewportProps();
     return this.zoom(
       {
@@ -611,6 +966,16 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
   }
 
   _panFromCenter(offset, constraintContext?: ConstraintContext) {
+    const interactionTarget = this.getState().interactionTarget;
+    const viewport = interactionTarget && this._getTargetViewport();
+    const targetInfo = viewport?.getTargetInfo(interactionTarget!.coordinate);
+    if (viewport && targetInfo) {
+      const screenPosition: [number, number] = [
+        targetInfo.projectedPosition[0] + offset[0],
+        targetInfo.projectedPosition[1] + offset[1]
+      ];
+      return this._getTargetPoseUpdatedState({}, constraintContext, undefined, screenPosition);
+    }
     const {width, height} = this.getViewportProps();
     return this.pan(
       {
@@ -630,6 +995,153 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
       ...newProps,
       constraintContext
     });
+  }
+
+  /** Applies a target-relative pose using the frozen operation-start viewport. */
+  _getTargetPoseUpdatedState(
+    pose: {bearing?: number; pitch?: number; zoom?: number},
+    constraintContext?: ConstraintContext,
+    expectedDistanceOverride?: number,
+    screenPositionOverride?: readonly [number, number]
+  ): MapState {
+    const state = this.getState();
+    const interactionTarget = state.interactionTarget;
+    const startProps = state.targetNavigationStartProps;
+    const screenPosition = screenPositionOverride
+      ? ([...screenPositionOverride] as [number, number])
+      : state.targetNavigationScreenPosition;
+    if (!interactionTarget || !startProps || !screenPosition) {
+      return this;
+    }
+
+    const currentProps = this.getViewportProps();
+    const zoom = this._constrainZoom(pose.zoom ?? currentProps.zoom);
+    const pitch = clamp(
+      pose.pitch ?? currentProps.pitch,
+      currentProps.minPitch,
+      currentProps.maxPitch
+    );
+    const bearing = pose.bearing ?? currentProps.bearing;
+    const sourceViewport = state.targetNavigationStartViewport;
+    const sourceTargetInfo = state.targetNavigationStartTargetInfo;
+    if (!sourceViewport || !sourceTargetInfo) {
+      return this;
+    }
+
+    const targetViewState = sourceViewport.getTargetViewState({
+      target: sourceTargetInfo.target,
+      screenPosition,
+      bearing,
+      pitch,
+      zoom
+    });
+    if (!targetViewState) {
+      return this;
+    }
+
+    let constrainedViewState = targetViewState;
+    if (state.targetNavigationConstraint) {
+      const candidateTarget = Object.freeze({
+        coordinate: interactionTarget.coordinate,
+        screenPosition: Object.freeze([...screenPosition]) as [number, number]
+      }) as Readonly<MapInteractionTarget>;
+      const applicationViewState = state.targetNavigationConstraint(
+        Object.freeze({
+          viewId: state.targetNavigationViewId || '',
+          operation: state.targetNavigationOperation || 'zoom',
+          source: state.targetNavigationSource || 'pointer',
+          target: candidateTarget,
+          sourceViewport,
+          currentViewState: freezeTargetViewState(this._toTargetViewState(currentProps)),
+          requestedViewState: freezeTargetViewState(targetViewState)
+        })
+      );
+      const copiedViewState = applicationViewState && copyTargetViewState(applicationViewState);
+      if (!copiedViewState) {
+        return this;
+      }
+      constrainedViewState = copiedViewState;
+    }
+
+    const expectedDistance = expectedDistanceOverride
+      ? expectedDistanceOverride * 2 ** (targetViewState.zoom - constrainedViewState.zoom)
+      : sourceTargetInfo.targetDistance * 2 ** (startProps.zoom - constrainedViewState.zoom);
+    return this._getTargetUpdatedState(
+      constrainedViewState,
+      screenPosition,
+      expectedDistance,
+      constraintContext
+    );
+  }
+
+  private _toTargetViewState(props: Required<MapStateProps>): WebMercatorTargetViewState {
+    return {
+      longitude: props.longitude,
+      latitude: props.latitude,
+      zoom: props.zoom,
+      bearing: props.bearing,
+      pitch: props.pitch,
+      position: [...props.position]
+    };
+  }
+
+  /** Applies ordinary constraints, then validates target-relative camera invariants. */
+  _getTargetUpdatedState(
+    newProps: Record<string, any>,
+    screenPosition: [number, number],
+    expectedDistance?: number,
+    constraintContext?: ConstraintContext
+  ): MapState {
+    const interactionTarget = this.getState().interactionTarget;
+    if (!interactionTarget) {
+      return this._getUpdatedState(newProps, constraintContext);
+    }
+
+    const candidate = this._getUpdatedState(
+      {...newProps, targetNavigationScreenPosition: [...screenPosition]},
+      constraintContext
+    );
+    const viewport = candidate._getTargetViewport();
+    const targetInfo = viewport?.getTargetInfo(interactionTarget.coordinate);
+    if (
+      !targetInfo?.isValid ||
+      targetInfo.cameraDepth < targetInfo.near * (1 + TARGET_NEAR_RELATIVE_EPSILON)
+    ) {
+      return this;
+    }
+
+    const pixelError = Math.hypot(
+      targetInfo.projectedPosition[0] - screenPosition[0],
+      targetInfo.projectedPosition[1] - screenPosition[1]
+    );
+    if (!Number.isFinite(pixelError) || pixelError > TARGET_PIXEL_TOLERANCE) {
+      return this;
+    }
+
+    if (expectedDistance !== undefined) {
+      const radiusTolerance = Math.max(
+        TARGET_RADIUS_ABSOLUTE_TOLERANCE,
+        TARGET_RADIUS_RELATIVE_TOLERANCE * expectedDistance
+      );
+      if (
+        !Number.isFinite(expectedDistance) ||
+        Math.abs(targetInfo.targetDistance - expectedDistance) > radiusTolerance
+      ) {
+        return this;
+      }
+    }
+
+    return candidate;
+  }
+
+  /** Returns a supported perspective Web Mercator viewport for target operations. */
+  _getTargetViewport(
+    props: Required<MapStateProps> = this.getViewportProps()
+  ): WebMercatorViewport | null {
+    const viewport = this.makeViewport(props);
+    return viewport instanceof WebMercatorViewport && viewport.supportsTargetNavigation
+      ? viewport
+      : null;
   }
 
   _unproject(pos?: [number, number]): [number, number] | undefined {
@@ -718,15 +1230,33 @@ export default class MapController extends Controller<MapState> {
    */
   protected rotationPivot: 'center' | '2d' | '3d' = 'center';
 
-  setProps(
-    props: ControllerProps &
-      MapStateProps & {
-        rotationPivot?: 'center' | '2d' | '3d';
-        getAltitude?: (pos: [number, number]) => number | undefined;
-      }
-  ) {
-    if ('rotationPivot' in props) {
-      this.rotationPivot = props.rotationPivot || 'center';
+  protected targetNavigation: boolean = false;
+  protected getInteractionTarget?: GetMapInteractionTarget;
+  protected constrainInteractionTargetViewState?: ConstrainMapInteractionTargetViewState;
+
+  private _activeTarget: MapInteractionTarget | null = null;
+  private _activeTargetOwners = new Set<'pan' | 'zoom' | 'rotate' | 'transition' | 'wheel'>();
+  private _wheelTargetTimer: ReturnType<typeof setTimeout> | null = null;
+  private _targetSessionGeneration = 0;
+  private _configurationRevision = 0;
+  private _targetConstraintDepth = 0;
+  private _activeTargetViewStructure: TargetViewStructure | null = null;
+
+  setProps(props: InternalMapControllerProps) {
+    if (this._targetConstraintDepth > 0) {
+      throw new Error(
+        'MapController.setProps cannot be called synchronously from constrainInteractionTargetViewState'
+      );
+    }
+    this._configurationRevision++;
+    this.rotationPivot = props.rotationPivot || 'center';
+
+    const wasEnabled = this.targetNavigation;
+    this.targetNavigation = props._targetNavigation ?? false;
+    this.getInteractionTarget = props.getInteractionTarget;
+    this.constrainInteractionTargetViewState = props.constrainInteractionTargetViewState;
+    if (wasEnabled && !this.targetNavigation) {
+      this._releaseAllTargets(true);
     }
     // this will be passed to MapState constructor
     props.getAltitude = this._getAltitude;
@@ -734,7 +1264,17 @@ export default class MapController extends Controller<MapState> {
     props.maxBounds =
       props.maxBounds || (props.normalize === false ? null : WEB_MERCATOR_MAX_BOUNDS);
 
+    if (
+      this._activeTarget &&
+      (!this._areTargetViewportDimensionsEqual(props) ||
+        !deepEqual(this._activeTargetViewStructure, getTargetViewStructure(props), -1))
+    ) {
+      this._releaseAllTargets(true);
+    }
     super.setProps(props);
+    if (!this.targetNavigation) {
+      this._cancelTargetTransition();
+    }
   }
 
   protected updateViewport(
@@ -742,9 +1282,34 @@ export default class MapController extends Controller<MapState> {
     extraProps: Record<string, any> | null = null,
     interactionState: InteractionState = {}
   ): void {
-    // Inject rotation pivot position during rotation for visual feedback
+    const targetSessionId = newControllerState.getState().targetNavigationSessionId;
+    if (
+      targetSessionId !== undefined &&
+      targetSessionId !== null &&
+      (targetSessionId !== this._targetSessionGeneration || !this._activeTarget)
+    ) {
+      return;
+    }
+    extraProps = this._getTargetTransitionProps(newControllerState, extraProps);
+
+    // Publish only the numeric target coordinate. Applications retain any semantic identity.
     const state = newControllerState.getState();
-    if (interactionState.isDragging && state.startRotateLngLat) {
+    if (state.interactionTarget) {
+      interactionState = {
+        ...interactionState,
+        interactionTargetPosition: [...state.interactionTarget.coordinate]
+      };
+      const isTargetRotation =
+        (this._activeTargetOwners.has('rotate') && interactionState.isDragging !== false) ||
+        (state.targetNavigationOperation === 'rotate' && interactionState.isRotating === true);
+      if (isTargetRotation) {
+        interactionState.rotationPivotPosition = [...state.interactionTarget.coordinate];
+      } else {
+        interactionState.rotationPivotPosition = undefined;
+      }
+    } else if (interactionState.isDragging && state.startRotateLngLat) {
+      // Retain the established rotation-pivot field for compatibility when target navigation is
+      // not active.
       interactionState = {
         ...interactionState,
         rotationPivotPosition: state.startRotateLngLat
@@ -755,6 +1320,584 @@ export default class MapController extends Controller<MapState> {
     }
 
     super.updateViewport(newControllerState, extraProps, interactionState);
+  }
+
+  finalize(): void {
+    this._releaseAllTargets(true);
+    super.finalize();
+  }
+
+  handleEvent(event: MjolnirEvent): boolean {
+    try {
+      return super.handleEvent(event);
+    } catch (error) {
+      this._releaseAllTargets(true);
+      throw error;
+    }
+  }
+
+  updateTransition(): void {
+    try {
+      super.updateTransition();
+    } catch (error) {
+      this._releaseAllTargets(true);
+      throw error;
+    }
+  }
+
+  /** Resolves one fresh numeric target. A configured provider is authoritative. */
+  protected resolveInteractionTarget(
+    screenPosition: [number, number] | null,
+    operation: MapInteractionTargetOperation,
+    source: MapInteractionTargetSource
+  ): MapInteractionTarget | null {
+    // Elastic MapState constraints require a separate target-aware rebound definition. Until that
+    // contract is implemented, preserve the complete stock rubber-band lifecycle.
+    if (!this.targetNavigation || this.props.rubberBand) {
+      return null;
+    }
+    const viewport = this.makeViewport(this.props);
+    if (!(viewport instanceof WebMercatorViewport) || !viewport.supportsTargetNavigation) {
+      return null;
+    }
+
+    const configurationRevision = this._configurationRevision;
+    const provider = this.getInteractionTarget;
+    let resolved: MapInteractionTarget | null = null;
+    if (provider) {
+      resolved = provider({
+        viewId: this.props.id,
+        operation,
+        source,
+        screenPosition: screenPosition && [...screenPosition],
+        viewport
+      });
+    } else if (screenPosition && this.pickPosition) {
+      const picked = this.pickPosition(
+        this.props.x + screenPosition[0],
+        this.props.y + screenPosition[1]
+      );
+      if (picked?.coordinate && picked.coordinate.length >= 3) {
+        resolved = {
+          coordinate: picked.coordinate.slice(0, 3) as [number, number, number],
+          screenPosition: [...screenPosition]
+        };
+      }
+    }
+
+    if (
+      configurationRevision !== this._configurationRevision ||
+      !this.targetNavigation ||
+      provider !== this.getInteractionTarget
+    ) {
+      return null;
+    }
+
+    return this._copyValidTarget(resolved, viewport);
+  }
+
+  /** Whether target navigation currently owns an acquired numeric coordinate. */
+  protected hasActiveInteractionTarget(): boolean {
+    return Boolean(this._activeTarget);
+  }
+
+  protected _onPanStart(event): boolean {
+    const pos = this.getCenter(event);
+    if (!this._isTargetPositionInBounds(pos) || event.handled) {
+      return false;
+    }
+    let alternateMode = this.isFunctionKeyPressed(event) || event.rightButton || false;
+    if (this.invertPan || this.dragMode === 'pan') {
+      alternateMode = !alternateMode;
+    }
+    const operation = alternateMode ? 'pan' : 'rotate';
+    if ((operation === 'pan' && this.dragPan) || (operation === 'rotate' && this.dragRotate)) {
+      this._acquireTarget(operation, event.pointerType === 'touch' ? 'touch' : 'pointer', pos);
+    }
+    return super._onPanStart(event);
+  }
+
+  protected _onPanMoveEnd(event): boolean {
+    const handled = super._onPanMoveEnd(event);
+    if (handled) {
+      if (this.transitionManager.transition.inProgress) {
+        this._activeTargetOwners.add('transition');
+      }
+      this._releaseTargetOwner('pan');
+    }
+    return handled;
+  }
+
+  protected _onPanRotateEnd(event): boolean {
+    const handled = super._onPanRotateEnd(event);
+    if (handled) {
+      if (this.transitionManager.transition.inProgress) {
+        this._activeTargetOwners.add('transition');
+      }
+      this._releaseTargetOwner('rotate');
+    }
+    return handled;
+  }
+
+  protected _onMultiPanStart(event): boolean {
+    const currentCenter = event.offsetCenter;
+    const currentPos = this.getCenter(event);
+    const isTrackpad = event.pointerType === 'trackpad';
+    const startEvent = {
+      ...event,
+      offsetCenter: {
+        x: currentCenter.x - (isTrackpad ? 0 : event.deltaX),
+        y: currentCenter.y - (isTrackpad ? 0 : event.deltaY)
+      }
+    };
+    const pos = this.getCenter(startEvent);
+    const modeEnabled =
+      this.multiTouchDrag === 'pan'
+        ? this.dragPan
+        : this.multiTouchDrag === 'rotate' && this.dragRotate;
+    const sourceEnabled =
+      event.pointerType === 'touch' || (event.pointerType === 'trackpad' && this.trackpadGesture);
+    if (
+      sourceEnabled &&
+      modeEnabled &&
+      this._isTargetPositionInBounds(currentPos) &&
+      this._isTargetPositionInBounds(pos) &&
+      !event.handled
+    ) {
+      this._acquireTarget(this.multiTouchDrag!, 'touch', pos);
+    }
+    return super._onMultiPanStart(event);
+  }
+
+  protected _onPinchStart(event): boolean {
+    const pos = this.getCenter(event);
+    const owners: Array<'zoom' | 'rotate'> = [
+      ...(this.touchZoom ? (['zoom'] as const) : []),
+      ...(this.touchRotate ? (['rotate'] as const) : [])
+    ];
+    let acquired = false;
+    if (owners.length > 0 && this._isTargetPositionInBounds(pos) && !event.handled) {
+      this._acquireTarget('pinch', 'touch', pos, owners);
+      acquired = Boolean(this._activeTarget);
+    }
+    const handled = super._onPinchStart(event);
+    if (!handled && acquired) {
+      this._releaseAllTargets(true);
+    }
+    return handled;
+  }
+
+  protected _onPinch(event): boolean {
+    if (!this._activeTarget || !this.touchZoom || !this.touchRotate) {
+      return super._onPinch(event);
+    }
+    if (!this.isDragging()) {
+      return false;
+    }
+    const newControllerState = this.controllerState.zoomRotate(
+      {
+        scale: event.scale,
+        deltaAngleX: (this._startPinchRotation || 0) - event.rotation
+      },
+      this._getConstraintContext('zoom', 'update')
+    );
+    this.updateViewport(
+      newControllerState,
+      {transitionDuration: 0},
+      {
+        isDragging: true,
+        isPanning: true,
+        isZooming: true,
+        isRotating: true
+      }
+    );
+    this._lastPinchEvent = event;
+    return true;
+  }
+
+  protected _onPinchEnd(event): boolean {
+    const handled = super._onPinchEnd(event);
+    if (handled) {
+      if (this.transitionManager.transition.inProgress) {
+        this._activeTargetOwners.add('transition');
+      }
+      this._releaseTargetOwner('zoom');
+      this._releaseTargetOwner('rotate');
+    }
+    return handled;
+  }
+
+  protected _onDoubleClickDragStart(event): boolean {
+    const pos = this.getCenter(event);
+    if (this.doubleClickDragZoom && this._isTargetPositionInBounds(pos) && !event.handled) {
+      this._acquireTarget('zoom', 'doubleClick', pos);
+    }
+    return super._onDoubleClickDragStart(event);
+  }
+
+  protected _onDoubleClickDragEnd(event): boolean {
+    const handled = super._onDoubleClickDragEnd(event);
+    if (handled) {
+      if (this.transitionManager.transition.inProgress) {
+        this._activeTargetOwners.add('transition');
+      }
+      this._releaseTargetOwner('zoom');
+    }
+    return handled;
+  }
+
+  protected _onWheel(event): boolean {
+    if (this.scrollZoom && !(this.trackpadGesture && event.device !== 'mouse')) {
+      const pos = this.getCenter(event);
+      if (this._isTargetPositionInBounds(pos) && !event.handled) {
+        this._acquireWheelTarget(pos);
+      }
+    }
+    return super._onWheel(event);
+  }
+
+  protected _onDoubleClick(event): boolean {
+    const pos = this.getCenter(event);
+    if (
+      this.doubleClickZoom &&
+      Date.now() >= this._suppressDoubleClickUntil &&
+      this._isTargetPositionInBounds(pos) &&
+      !event.handled
+    ) {
+      this._acquireTarget('zoom', 'doubleClick', pos, ['transition']);
+    }
+    const handled = super._onDoubleClick(event);
+    if (!handled || !this.transitionManager.transition.inProgress) {
+      this._releaseTargetOwner('transition');
+    }
+    return handled;
+  }
+
+  protected _onKeyDown(event): boolean {
+    if (!this.keyboard) {
+      return super._onKeyDown(event);
+    }
+    const code = event.srcEvent.code;
+    if (
+      code !== 'Minus' &&
+      code !== 'Equal' &&
+      code !== 'ArrowLeft' &&
+      code !== 'ArrowRight' &&
+      code !== 'ArrowUp' &&
+      code !== 'ArrowDown'
+    ) {
+      return super._onKeyDown(event);
+    }
+    const operation: MapInteractionTargetOperation =
+      code === 'Minus' || code === 'Equal'
+        ? 'zoom'
+        : this.isFunctionKeyPressed(event)
+          ? 'rotate'
+          : 'pan';
+    const target = this._acquireTarget(operation, 'keyboard', null, ['transition']);
+    let handled: boolean;
+    if (target && (code === 'Minus' || code === 'Equal') && this.isFunctionKeyPressed(event)) {
+      const {zoomSpeed = 2} = this.keyboard === true ? {} : this.keyboard;
+      const speed = zoomSpeed * zoomSpeed;
+      const newControllerState =
+        code === 'Minus' ? this.controllerState.zoomOut(speed) : this.controllerState.zoomIn(speed);
+      this.updateViewport(newControllerState, this._getTransitionProps(), {isZooming: true});
+      handled = true;
+    } else {
+      handled = super._onKeyDown(event);
+    }
+    if (!handled || !this.transitionManager.transition.inProgress) {
+      this._releaseTargetOwner('transition');
+    }
+    return handled;
+  }
+
+  private _copyValidTarget(
+    target: MapInteractionTarget | null,
+    viewport: WebMercatorViewport
+  ): MapInteractionTarget | null {
+    if (
+      !target ||
+      !Array.isArray(target.coordinate) ||
+      target.coordinate.length !== 3 ||
+      !target.coordinate.every(Number.isFinite) ||
+      !Array.isArray(target.screenPosition) ||
+      target.screenPosition.length !== 2 ||
+      !target.screenPosition.every(Number.isFinite)
+    ) {
+      return null;
+    }
+    const targetInfo = viewport.getTargetInfo(target.coordinate);
+    if (
+      !targetInfo?.isVisible ||
+      targetInfo.cameraDepth < targetInfo.near * (1 + TARGET_NEAR_RELATIVE_EPSILON)
+    ) {
+      return null;
+    }
+    const pixelError = Math.hypot(
+      targetInfo.projectedPosition[0] - target.screenPosition[0],
+      targetInfo.projectedPosition[1] - target.screenPosition[1]
+    );
+    if (pixelError > TARGET_PIXEL_TOLERANCE) {
+      return null;
+    }
+    return {
+      coordinate: [...targetInfo.target],
+      screenPosition: [...target.screenPosition]
+    };
+  }
+
+  private _isTargetPositionInBounds(pos: [number, number]): boolean {
+    return pos[0] >= 0 && pos[0] <= this.props.width && pos[1] >= 0 && pos[1] <= this.props.height;
+  }
+
+  private _acquireTarget(
+    operation: MapInteractionTargetOperation,
+    source: MapInteractionTargetSource,
+    screenPosition: [number, number] | null,
+    owners: Array<'pan' | 'zoom' | 'rotate' | 'transition' | 'wheel'> = [
+      operation === 'pinch' ? 'zoom' : operation
+    ] as Array<'pan' | 'zoom' | 'rotate' | 'transition' | 'wheel'>
+  ): MapInteractionTarget | null {
+    if (this._activeTarget) {
+      const reuseActiveTarget =
+        owners.length === 1 && owners[0] === 'wheel' && this._activeTargetOwners.has('wheel');
+      if (reuseActiveTarget) {
+        for (const owner of owners) this._activeTargetOwners.add(owner);
+        return this._activeTarget;
+      }
+      // An active transition is a completed input session. A new gesture must acquire a fresh
+      // scene target; only an explicitly continued wheel burst may reuse its frozen snapshot.
+      this._releaseAllTargets(true);
+    }
+
+    try {
+      const configurationRevision = this._configurationRevision;
+      const target = this.resolveInteractionTarget(screenPosition, operation, source);
+      if (
+        !target ||
+        !this.targetNavigation ||
+        configurationRevision !== this._configurationRevision
+      ) {
+        return null;
+      }
+      this._activeTarget = target;
+      this._targetSessionGeneration++;
+      this._activeTargetViewStructure = getTargetViewStructure(
+        this.props as InternalMapControllerProps
+      );
+      for (const owner of owners) this._activeTargetOwners.add(owner);
+      this._installTargetState(target, operation, source);
+      return target;
+    } catch (error) {
+      this._releaseAllTargets(true);
+      this._setInteractionState({
+        interactionTargetPosition: undefined,
+        rotationPivotPosition: undefined
+      });
+      throw error;
+    }
+  }
+
+  private _acquireWheelTarget(screenPosition: [number, number]): MapInteractionTarget | null {
+    if (this._activeTargetOwners.has('wheel')) {
+      this._acquireTarget('zoom', 'wheel', screenPosition, ['wheel']);
+    } else {
+      this._acquireTarget('zoom', 'wheel', screenPosition, ['wheel']);
+    }
+    if (this._activeTarget) {
+      this._activeTargetOwners.add('transition');
+    }
+    if (this._wheelTargetTimer) {
+      clearTimeout(this._wheelTargetTimer);
+    }
+    this._wheelTargetTimer = setTimeout(() => {
+      this._wheelTargetTimer = null;
+      this._releaseTargetOwner('wheel');
+      if (!this.transitionManager.transition.inProgress) {
+        this._releaseTargetOwner('transition');
+      }
+    }, TARGET_WHEEL_RELEASE_MS);
+    return this._activeTarget;
+  }
+
+  private _installTargetState(
+    target: MapInteractionTarget,
+    operation: MapInteractionTargetOperation,
+    source: MapInteractionTargetSource
+  ): void {
+    const constraint = this.constrainInteractionTargetViewState;
+    const state = this.controllerState.withInteractionTarget(target, {
+      viewId: this.props.id,
+      operation,
+      source,
+      sessionId: this._targetSessionGeneration,
+      constrainViewState: constraint
+        ? context => {
+            this._targetConstraintDepth++;
+            try {
+              return constraint(context);
+            } finally {
+              this._targetConstraintDepth--;
+            }
+          }
+        : undefined
+    });
+    this.state = state.getState();
+    this._controllerState = state;
+    this._setInteractionState({interactionTargetPosition: [...target.coordinate]});
+  }
+
+  private _releaseTargetOwner(owner: 'pan' | 'zoom' | 'rotate' | 'transition' | 'wheel'): void {
+    this._activeTargetOwners.delete(owner);
+    if (this._activeTargetOwners.size === 0) {
+      this._clearTargetState();
+    }
+  }
+
+  private _releaseAllTargets(cancelTransition: boolean = false): void {
+    if (cancelTransition) {
+      this._cancelTargetTransition();
+    }
+    if (this._wheelTargetTimer) {
+      clearTimeout(this._wheelTargetTimer);
+      this._wheelTargetTimer = null;
+    }
+    this._activeTargetOwners.clear();
+    this._clearTargetState(cancelTransition);
+  }
+
+  private _clearTargetState(cancelInteraction: boolean = false): void {
+    if (!this._activeTarget) {
+      return;
+    }
+    this._activeTarget = null;
+    this._activeTargetViewStructure = null;
+    this._targetSessionGeneration++;
+    const state = this.controllerState.withoutInteractionTarget();
+    this.state = state.getState();
+    this._controllerState = state;
+    this._setInteractionState({
+      interactionTargetPosition: undefined,
+      rotationPivotPosition: undefined,
+      ...(cancelInteraction
+        ? {
+            isDragging: false,
+            isPanning: false,
+            isZooming: false,
+            isRotating: false
+          }
+        : {})
+    });
+  }
+
+  private _getCurrentTargetViewport(): WebMercatorViewport | null {
+    const viewport = this.makeViewport(this.controllerState.getViewportProps());
+    return viewport instanceof WebMercatorViewport && viewport.supportsTargetNavigation
+      ? viewport
+      : null;
+  }
+
+  private _areTargetViewportDimensionsEqual(props: ControllerProps): boolean {
+    return (
+      props.id === this.props.id &&
+      props.x === this.props.x &&
+      props.y === this.props.y &&
+      props.width === this.props.width &&
+      props.height === this.props.height
+    );
+  }
+
+  private _cancelTargetTransition(): void {
+    const transition = this.transitionManager.transition;
+    const interpolator = (transition.settings as {interpolator?: unknown}).interpolator;
+    if (transition.inProgress && interpolator instanceof TargetNavigationInterpolator) {
+      transition.cancel();
+    }
+  }
+
+  /** Replaces a controller-generated map transition with target-aware frame construction. */
+  private _getTargetTransitionProps(
+    endControllerState: MapState,
+    transitionProps: Record<string, any> | null
+  ): Record<string, any> | null {
+    if (
+      !this.targetNavigation ||
+      !this._activeTarget ||
+      !transitionProps ||
+      !transitionProps.transitionDuration
+    ) {
+      return transitionProps;
+    }
+
+    const startViewport = this._getCurrentTargetViewport();
+    const targetInfo = startViewport?.getTargetInfo(this._activeTarget.coordinate);
+    const endScreenPosition = endControllerState.getState().targetNavigationScreenPosition;
+    if (!startViewport || !targetInfo?.isValid || !endScreenPosition) {
+      return transitionProps;
+    }
+
+    const target: MapInteractionTarget = {
+      coordinate: [...targetInfo.target],
+      screenPosition: [targetInfo.projectedPosition[0], targetInfo.projectedPosition[1]]
+    };
+    const targetSessionGeneration = this._targetSessionGeneration;
+    return {
+      ...transitionProps,
+      transitionInterpolator: new TargetNavigationInterpolator({
+        target,
+        startRadius: targetInfo.targetDistance,
+        endScreenPosition: [...endScreenPosition],
+        resolveFrame: (props, context) => this._resolveTargetTransitionFrame(props, context)
+      }),
+      onTransitionInterrupt: this._wrapTargetTransitionEnd(
+        targetSessionGeneration,
+        transitionProps.onTransitionInterrupt
+      ),
+      onTransitionEnd: this._wrapTargetTransitionEnd(
+        targetSessionGeneration,
+        transitionProps.onTransitionEnd
+      )
+    };
+  }
+
+  private _resolveTargetTransitionFrame(
+    props: Readonly<Record<string, any>>,
+    context: TargetNavigationTransitionContext
+  ): Record<string, any> | null {
+    const current = this.controllerState;
+    if (!current.getState().interactionTarget) {
+      return null;
+    }
+    const previous = current._getUpdatedState(context.previousProps, {mode: 'preserve'});
+    const candidate = previous._getTargetPoseUpdatedState(
+      {
+        bearing: props.bearing,
+        pitch: props.pitch,
+        zoom: props.zoom
+      },
+      {mode: 'hard'},
+      context.radius,
+      context.screenPosition as [number, number]
+    );
+    return candidate === previous ? null : candidate.getViewportProps();
+  }
+
+  private _wrapTargetTransitionEnd(
+    targetSessionGeneration: number,
+    callback?: (transition: any) => void
+  ) {
+    return transition => {
+      // A smooth wheel update interrupts the preceding transition immediately before starting
+      // the replacement. The wheel-burst owner bridges that internal restart.
+      if (
+        targetSessionGeneration === this._targetSessionGeneration &&
+        !this._activeTargetOwners.has('wheel')
+      ) {
+        this._releaseTargetOwner('transition');
+      }
+      callback?.(transition);
+    };
   }
 
   /** Add altitude to rotateStart params based on rotationPivot mode */
