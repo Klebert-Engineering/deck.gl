@@ -493,12 +493,16 @@ export default class ViewManager<ViewsT extends View[]> {
         x: viewport.x,
         y: viewport.y,
         width: viewport.width,
-        height: viewport.height
+        height: viewport.height,
+        // Internal structural input used by projection-aware controllers. It intentionally is not
+        // part of the exported ControllerProps contract.
+        _view: view
       };
 
       // Create controller if not already existing or if the type of the
       // controller has changed.
       if (!controller || controller.constructor !== controllerProps.type) {
+        controller?.finalize();
         controller = this._createController(view, resolvedProps);
       }
       if (controller) {

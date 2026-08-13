@@ -481,7 +481,9 @@ Receives arguments:
   + `isPanning` (boolean)
   + `isRotating` (boolean)
   + `isZooming` (boolean)
+  + `viewId` (string) - Identifier of the view that owns the interaction.
   + `rotationPivotPosition` ([number, number, number]) - World coordinate `[lng, lat, altitude]` of the rotation pivot point when rotating. Only present when the `rotationPivot` controller option is set to `'2d'` or `'3d'`.
+  + `interactionTargetPosition` ([number, number, number]) - Numeric world coordinate `[lng, lat, altitude]` anchoring experimental target navigation. It is present from acquisition through any controller-generated transition and explicitly cleared when that lifecycle ends or a target callback throws. The target's screen pixel and any feature identity remain application/controller details. During target-relative rotation, this coordinate also takes precedence as `rotationPivotPosition`.
 * `oldViewState` - The previous [view state](../../developer-guide/views.md) object.
 
 Returns:
@@ -504,7 +506,9 @@ Receives arguments:
   + `isPanning` (boolean)
   + `isRotating` (boolean)
   + `isZooming` (boolean)
+  + `viewId` (string) - Identifier of the view that owns the interaction.
   + `rotationPivotPosition` ([number, number, number]) - World coordinate `[lng, lat, altitude]` of the rotation pivot point when rotating. Only present when the `rotationPivot` controller option is set to `'2d'` or `'3d'`.
+  + `interactionTargetPosition` ([number, number, number]) - Numeric world coordinate `[lng, lat, altitude]` anchoring experimental target navigation. It is present from acquisition through any controller-generated transition and explicitly cleared when that lifecycle ends or a target callback throws. The target's screen pixel and any feature identity remain application/controller details. During target-relative rotation, this coordinate also takes precedence as `rotationPivotPosition`.
 
 Note:
 * `onInteractionStateChange` may be fired without `onViewStateChange`. For example, when the pointer is released at the end of a drag-pan, `isDragging` is reset to `false`, without the viewport's `longitude` and `latitude` changing.

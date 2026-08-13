@@ -51,6 +51,8 @@ Supports all [MapController options](./map-controller.md#options) with the follo
 
 - `rotationPivot` - default `'3d'` (rotate around the picked object under the pointer)
 
+When experimental `_targetNavigation` is active, target anchoring takes precedence over terrain elevation rebasing. Periodic terrain-center picking and rebasing resume after the target lifecycle ends.
+
 ## Source
 
 [modules/core/src/controllers/terrain-controller.ts](https://github.com/visgl/deck.gl/blob/master/modules/core/src/controllers/terrain-controller.ts)

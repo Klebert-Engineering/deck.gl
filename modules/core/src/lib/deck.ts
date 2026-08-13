@@ -43,6 +43,7 @@ import type {Effect} from './effect';
 import type {FilterContext} from '../passes/layers-pass';
 import type Layer from './layer';
 import type View from '../views/view';
+import type {MapViewProps} from '../views/map-view';
 import type Viewport from '../viewports/viewport';
 import type {EventManagerOptions, MjolnirGestureEvent, MjolnirPointerEvent} from 'mjolnir.js';
 import type {TypedArrayManagerOptions} from '../utils/typed-array-manager';
@@ -170,7 +171,7 @@ export type DeckProps<ViewsT extends ViewOrViews = null> = {
   /** Options for viewport interactivity, e.g. pan, rotate and zoom with mouse, touch and keyboard.
    * This is a shorthand for defining interaction with the `views` prop if you are using the default view (i.e. a single `MapView`)
    */
-  controller?: View['props']['controller'];
+  controller?: MapViewProps['controller'];
   /**
    * An object that describes the view state for each view in the `views` prop.
    * Use if the camera state should be managed external to the `Deck` instance.
