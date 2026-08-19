@@ -149,10 +149,10 @@ export default {
   source: sourceWGSL,
   uniformTypes: {
     ...picking.uniformTypes,
-    disabledPickingIndexCount: 'f32',
-    disabledPickingIndices0: 'vec4<f32>',
-    disabledPickingIndices1: 'vec4<f32>',
-    disabledPickingIndices2: 'vec4<f32>'
+    disabledPickingIndexCount: 'f32' as const,
+    disabledPickingIndices0: 'vec4<f32>' as const,
+    disabledPickingIndices1: 'vec4<f32>' as const,
+    disabledPickingIndices2: 'vec4<f32>' as const
   },
   defaultUniforms: {
     ...picking.defaultUniforms,

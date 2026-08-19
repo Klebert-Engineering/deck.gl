@@ -17,6 +17,7 @@ import type {
   MapInteractionTargetViewStateContext,
   MapViewProps,
   WebMercatorTargetInfo,
+  WebMercatorTargetPanViewStateOptions,
   WebMercatorTargetViewState,
   WebMercatorTargetViewStateOptions
 } from '@deck.gl/core';
@@ -32,6 +33,7 @@ import type {
   MapInteractionTargetViewStateContext as MainMapInteractionTargetViewStateContext,
   MapViewProps as MainMapViewProps,
   WebMercatorTargetInfo as MainWebMercatorTargetInfo,
+  WebMercatorTargetPanViewStateOptions as MainWebMercatorTargetPanViewStateOptions,
   WebMercatorTargetViewState as MainWebMercatorTargetViewState,
   WebMercatorTargetViewStateOptions as MainWebMercatorTargetViewStateOptions
 } from 'deck.gl';
@@ -88,6 +90,7 @@ type PublicTargetContracts =
   | MapInteractionTargetSource
   | MapInteractionTargetViewStateContext
   | WebMercatorTargetInfo
+  | WebMercatorTargetPanViewStateOptions
   | WebMercatorTargetViewState
   | WebMercatorTargetViewStateOptions
   | MainMapInteractionTarget
@@ -96,9 +99,11 @@ type PublicTargetContracts =
   | MainMapInteractionTargetSource
   | MainMapInteractionTargetViewStateContext
   | MainWebMercatorTargetInfo
+  | MainWebMercatorTargetPanViewStateOptions
   | MainWebMercatorTargetViewState
   | MainWebMercatorTargetViewStateOptions;
 const publicTargetContract: PublicTargetContracts | null = null;
+const trackpadSource: MapInteractionTargetSource = 'trackpad';
 
 test('MapView types map controller options and preserve a custom controller escape hatch', () => {
   const mapView = new MapView(mapViewProps);
@@ -128,6 +133,7 @@ test('MapView types map controller options and preserve a custom controller esca
   expect(mainGetInteractionTarget).toBe(getInteractionTarget);
   expect(mainConstrainInteractionTargetViewState).toBe(constrainInteractionTargetViewState);
   expect(publicTargetContract).toBeNull();
+  expect(trackpadSource).toBe('trackpad');
   expect(invalidMapViewProps.controller).toEqual({dragPan: true, customMode: 'precise'});
   expect(invalidDeckProps.controller).toEqual({dragPan: true, customMode: 'precise'});
 });

@@ -42,6 +42,7 @@ const TARGET_PIXEL_TOLERANCE = 0.1;
 const TARGET_RADIUS_ABSOLUTE_TOLERANCE = 0.01;
 const TARGET_RADIUS_RELATIVE_TOLERANCE = 1e-7;
 const TARGET_NEAR_RELATIVE_EPSILON = 1e-6;
+const TARGET_CENTER_Z_RELATIVE_TOLERANCE = 1e-10;
 const TARGET_WHEEL_RELEASE_MS = 150;
 
 type InternalMapControllerProps = ControllerProps &
@@ -106,7 +107,13 @@ export type MapInteractionTarget = {
 export type MapInteractionTargetOperation = 'pan' | 'zoom' | 'rotate' | 'pinch';
 
 /** Input source that initiated target acquisition. */
-export type MapInteractionTargetSource = 'pointer' | 'touch' | 'wheel' | 'doubleClick' | 'keyboard';
+export type MapInteractionTargetSource =
+  | 'pointer'
+  | 'touch'
+  | 'trackpad'
+  | 'wheel'
+  | 'doubleClick'
+  | 'keyboard';
 
 /** Context supplied to an application's synchronous target provider. */
 export type MapInteractionTargetContext = {
@@ -116,7 +123,10 @@ export type MapInteractionTargetContext = {
   operation: MapInteractionTargetOperation;
   /** Input source that initiated the operation. */
   source: MapInteractionTargetSource;
-  /** View-local CSS-pixel position, or `null` for pointerless input. */
+  /**
+   * View-local acquisition pixel, or `null` for pointerless input. Pointer/touch drags report the
+   * gesture origin; trackpad gestures report their first recognized sample.
+   */
   screenPosition: [number, number] | null;
   /** Active immutable Web Mercator viewport. */
   viewport: WebMercatorViewport;
@@ -277,6 +287,8 @@ export type MapStateInternal = {
   targetNavigationSessionId?: number;
   /** Target's desired view-local screen position in the most recent accepted state. */
   targetNavigationScreenPosition?: [number, number];
+  /** Raw pointer/touch origin, or first recognized trackpad sample, for absolute pan deltas. */
+  targetNavigationInputOrigin?: [number, number];
   /** Constraint callback frozen for the active target session. */
   targetNavigationConstraint?: ConstrainMapInteractionTargetViewState;
   /** View and input identity frozen for the active target session. */
@@ -360,6 +372,8 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
       targetNavigationSessionId,
       /** Target's desired pixel in the most recent accepted state */
       targetNavigationScreenPosition,
+      /** Raw input origin used to calculate absolute target-pan deltas */
+      targetNavigationInputOrigin,
       /** Application candidate policy frozen for this target session */
       targetNavigationConstraint,
       /** View and input identity frozen for this target session */
@@ -415,6 +429,7 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
         targetNavigationStartTargetInfo,
         targetNavigationSessionId,
         targetNavigationScreenPosition,
+        targetNavigationInputOrigin,
         targetNavigationConstraint,
         targetNavigationViewId,
         targetNavigationOperation,
@@ -435,6 +450,7 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
       operation: MapInteractionTargetOperation;
       source: MapInteractionTargetSource;
       sessionId: number;
+      inputOrigin?: [number, number] | null;
       constrainViewState?: ConstrainMapInteractionTargetViewState;
     }
   ): MapState {
@@ -461,6 +477,9 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
       targetNavigationStartTargetInfo,
       targetNavigationSessionId: session?.sessionId,
       targetNavigationScreenPosition: [...screenPosition],
+      targetNavigationInputOrigin: session?.inputOrigin
+        ? [...session.inputOrigin]
+        : [...screenPosition],
       targetNavigationConstraint: session?.constrainViewState,
       targetNavigationViewId: session?.viewId,
       targetNavigationOperation: session?.operation,
@@ -486,6 +505,7 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
       targetNavigationStartTargetInfo: null,
       targetNavigationSessionId: null,
       targetNavigationScreenPosition: null,
+      targetNavigationInputOrigin: null,
       targetNavigationConstraint: null,
       targetNavigationViewId: null,
       targetNavigationOperation: null,
@@ -516,12 +536,21 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
     {pos, startPos}: {pos: [number, number]; startPos?: [number, number]},
     constraintContext?: ConstraintContext
   ): MapState {
-    const interactionTarget = this.getState().interactionTarget;
+    const state = this.getState();
+    const interactionTarget = state.interactionTarget;
     if (interactionTarget) {
-      return this._getTargetPoseUpdatedState({}, constraintContext, undefined, pos);
+      const inputOrigin = state.targetNavigationInputOrigin || interactionTarget.screenPosition;
+      const targetStartPosition = interactionTarget.screenPosition;
+      return this._getTargetPanUpdatedState(
+        [
+          targetStartPosition[0] + pos[0] - inputOrigin[0],
+          targetStartPosition[1] + pos[1] - inputOrigin[1]
+        ],
+        constraintContext
+      );
     }
 
-    const startPanLngLat = this.getState().startPanLngLat || this._unproject(startPos);
+    const startPanLngLat = state.startPanLngLat || this._unproject(startPos);
 
     if (!startPanLngLat) {
       return this;
@@ -966,15 +995,15 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
   }
 
   _panFromCenter(offset, constraintContext?: ConstraintContext) {
-    const interactionTarget = this.getState().interactionTarget;
-    const viewport = interactionTarget && this._getTargetViewport();
-    const targetInfo = viewport?.getTargetInfo(interactionTarget!.coordinate);
-    if (viewport && targetInfo) {
+    const state = this.getState();
+    const interactionTarget = state.interactionTarget;
+    const targetScreenPosition = state.targetNavigationScreenPosition;
+    if (interactionTarget && targetScreenPosition) {
       const screenPosition: [number, number] = [
-        targetInfo.projectedPosition[0] + offset[0],
-        targetInfo.projectedPosition[1] + offset[1]
+        targetScreenPosition[0] + offset[0],
+        targetScreenPosition[1] + offset[1]
       ];
-      return this._getTargetPoseUpdatedState({}, constraintContext, undefined, screenPosition);
+      return this._getTargetPanUpdatedState(screenPosition, constraintContext);
     }
     const {width, height} = this.getViewportProps();
     return this.pan(
@@ -995,6 +1024,65 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
       ...newProps,
       constraintContext
     });
+  }
+
+  /** Applies a target-aware planar translation using the frozen operation-start viewport. */
+  _getTargetPanUpdatedState(
+    screenPosition: [number, number],
+    constraintContext?: ConstraintContext
+  ): MapState {
+    const state = this.getState();
+    const sourceViewport = state.targetNavigationStartViewport;
+    const sourceTargetInfo = state.targetNavigationStartTargetInfo;
+    if (!state.interactionTarget || !sourceViewport || !sourceTargetInfo) {
+      return this;
+    }
+
+    const requestedViewState = sourceViewport.getTargetPanViewState({
+      target: sourceTargetInfo.target,
+      screenPosition
+    });
+    if (!requestedViewState) {
+      return this;
+    }
+    const constrainedViewState = this._applyTargetViewStateConstraint(
+      requestedViewState,
+      screenPosition
+    );
+    if (!constrainedViewState) {
+      return this;
+    }
+
+    const candidate = this._getTargetUpdatedState(
+      constrainedViewState,
+      screenPosition,
+      undefined,
+      constraintContext
+    );
+    if (candidate === this) {
+      return this;
+    }
+
+    const candidateViewport = candidate._getTargetViewport();
+    if (!candidateViewport) {
+      return this;
+    }
+    const centerZTolerance =
+      TARGET_CENTER_Z_RELATIVE_TOLERANCE *
+      Math.max(1, Math.abs(sourceViewport.center[2]), Math.abs(candidateViewport.center[2]));
+    const bearingDelta = Math.abs(
+      mod(candidateViewport.bearing - sourceViewport.bearing + 180, 360) - 180
+    );
+    if (
+      Math.abs(candidateViewport.center[2] - sourceViewport.center[2]) > centerZTolerance ||
+      Math.abs(candidateViewport.zoom - sourceViewport.zoom) > TARGET_CENTER_Z_RELATIVE_TOLERANCE ||
+      Math.abs(candidateViewport.pitch - sourceViewport.pitch) >
+        TARGET_CENTER_Z_RELATIVE_TOLERANCE ||
+      bearingDelta > TARGET_CENTER_Z_RELATIVE_TOLERANCE
+    ) {
+      return this;
+    }
+    return candidate;
   }
 
   /** Applies a target-relative pose using the frozen operation-start viewport. */
@@ -1039,28 +1127,12 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
       return this;
     }
 
-    let constrainedViewState = targetViewState;
-    if (state.targetNavigationConstraint) {
-      const candidateTarget = Object.freeze({
-        coordinate: interactionTarget.coordinate,
-        screenPosition: Object.freeze([...screenPosition]) as [number, number]
-      }) as Readonly<MapInteractionTarget>;
-      const applicationViewState = state.targetNavigationConstraint(
-        Object.freeze({
-          viewId: state.targetNavigationViewId || '',
-          operation: state.targetNavigationOperation || 'zoom',
-          source: state.targetNavigationSource || 'pointer',
-          target: candidateTarget,
-          sourceViewport,
-          currentViewState: freezeTargetViewState(this._toTargetViewState(currentProps)),
-          requestedViewState: freezeTargetViewState(targetViewState)
-        })
-      );
-      const copiedViewState = applicationViewState && copyTargetViewState(applicationViewState);
-      if (!copiedViewState) {
-        return this;
-      }
-      constrainedViewState = copiedViewState;
+    const constrainedViewState = this._applyTargetViewStateConstraint(
+      targetViewState,
+      screenPosition
+    );
+    if (!constrainedViewState) {
+      return this;
     }
 
     const expectedDistance = expectedDistanceOverride
@@ -1072,6 +1144,39 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
       expectedDistance,
       constraintContext
     );
+  }
+
+  /** Applies the application target policy before ordinary MapState constraints. */
+  private _applyTargetViewStateConstraint(
+    requestedViewState: WebMercatorTargetViewState,
+    screenPosition: [number, number]
+  ): WebMercatorTargetViewState | null {
+    const state = this.getState();
+    const interactionTarget = state.interactionTarget;
+    const sourceViewport = state.targetNavigationStartViewport;
+    if (!interactionTarget || !sourceViewport) {
+      return null;
+    }
+    if (!state.targetNavigationConstraint) {
+      return requestedViewState;
+    }
+
+    const candidateTarget = Object.freeze({
+      coordinate: interactionTarget.coordinate,
+      screenPosition: Object.freeze([...screenPosition]) as [number, number]
+    }) as Readonly<MapInteractionTarget>;
+    const applicationViewState = state.targetNavigationConstraint(
+      Object.freeze({
+        viewId: state.targetNavigationViewId || '',
+        operation: state.targetNavigationOperation || 'zoom',
+        source: state.targetNavigationSource || 'pointer',
+        target: candidateTarget,
+        sourceViewport,
+        currentViewState: freezeTargetViewState(this._toTargetViewState(this.getViewportProps())),
+        requestedViewState: freezeTargetViewState(requestedViewState)
+      })
+    );
+    return applicationViewState && copyTargetViewState(applicationViewState);
   }
 
   private _toTargetViewState(props: Required<MapStateProps>): WebMercatorTargetViewState {
@@ -1402,8 +1507,13 @@ export default class MapController extends Controller<MapState> {
   }
 
   protected _onPanStart(event): boolean {
-    const pos = this.getCenter(event);
-    if (!this._isTargetPositionInBounds(pos) || event.handled) {
+    const currentPosition = this.getCenter(event);
+    const acquisitionPosition = this._getGestureAcquisitionPosition(event);
+    if (
+      !this._isTargetPositionInBounds(currentPosition) ||
+      !this._isTargetPositionInBounds(acquisitionPosition) ||
+      event.handled
+    ) {
       return false;
     }
     let alternateMode = this.isFunctionKeyPressed(event) || event.rightButton || false;
@@ -1411,8 +1521,18 @@ export default class MapController extends Controller<MapState> {
       alternateMode = !alternateMode;
     }
     const operation = alternateMode ? 'pan' : 'rotate';
-    if ((operation === 'pan' && this.dragPan) || (operation === 'rotate' && this.dragRotate)) {
-      this._acquireTarget(operation, event.pointerType === 'touch' ? 'touch' : 'pointer', pos);
+    const sourceEnabled = event.pointerType !== 'trackpad' || this.trackpadGesture;
+    if (
+      sourceEnabled &&
+      ((operation === 'pan' && this.dragPan) || (operation === 'rotate' && this.dragRotate))
+    ) {
+      const source: MapInteractionTargetSource =
+        event.pointerType === 'trackpad'
+          ? 'trackpad'
+          : event.pointerType === 'touch'
+            ? 'touch'
+            : 'pointer';
+      this._acquireTarget(operation, source, acquisitionPosition);
     }
     return super._onPanStart(event);
   }
@@ -1420,7 +1540,7 @@ export default class MapController extends Controller<MapState> {
   protected _onPanMoveEnd(event): boolean {
     const handled = super._onPanMoveEnd(event);
     if (handled) {
-      if (this.transitionManager.transition.inProgress) {
+      if (this._activeTarget && this.transitionManager.transition.inProgress) {
         this._activeTargetOwners.add('transition');
       }
       this._releaseTargetOwner('pan');
@@ -1431,7 +1551,7 @@ export default class MapController extends Controller<MapState> {
   protected _onPanRotateEnd(event): boolean {
     const handled = super._onPanRotateEnd(event);
     if (handled) {
-      if (this.transitionManager.transition.inProgress) {
+      if (this._activeTarget && this.transitionManager.transition.inProgress) {
         this._activeTargetOwners.add('transition');
       }
       this._releaseTargetOwner('rotate');
@@ -1440,17 +1560,9 @@ export default class MapController extends Controller<MapState> {
   }
 
   protected _onMultiPanStart(event): boolean {
-    const currentCenter = event.offsetCenter;
     const currentPos = this.getCenter(event);
     const isTrackpad = event.pointerType === 'trackpad';
-    const startEvent = {
-      ...event,
-      offsetCenter: {
-        x: currentCenter.x - (isTrackpad ? 0 : event.deltaX),
-        y: currentCenter.y - (isTrackpad ? 0 : event.deltaY)
-      }
-    };
-    const pos = this.getCenter(startEvent);
+    const pos = this._getGestureAcquisitionPosition(event);
     const modeEnabled =
       this.multiTouchDrag === 'pan'
         ? this.dragPan
@@ -1464,20 +1576,22 @@ export default class MapController extends Controller<MapState> {
       this._isTargetPositionInBounds(pos) &&
       !event.handled
     ) {
-      this._acquireTarget(this.multiTouchDrag!, 'touch', pos);
+      this._acquireTarget(this.multiTouchDrag!, isTrackpad ? 'trackpad' : 'touch', pos);
     }
     return super._onMultiPanStart(event);
   }
 
   protected _onPinchStart(event): boolean {
     const pos = this.getCenter(event);
+    const source: MapInteractionTargetSource =
+      event.pointerType === 'trackpad' ? 'trackpad' : 'touch';
     const owners: Array<'zoom' | 'rotate'> = [
       ...(this.touchZoom ? (['zoom'] as const) : []),
       ...(this.touchRotate ? (['rotate'] as const) : [])
     ];
     let acquired = false;
     if (owners.length > 0 && this._isTargetPositionInBounds(pos) && !event.handled) {
-      this._acquireTarget('pinch', 'touch', pos, owners);
+      this._acquireTarget('pinch', source, pos, owners);
       acquired = Boolean(this._activeTarget);
     }
     const handled = super._onPinchStart(event);
@@ -1518,7 +1632,7 @@ export default class MapController extends Controller<MapState> {
   protected _onPinchEnd(event): boolean {
     const handled = super._onPinchEnd(event);
     if (handled) {
-      if (this.transitionManager.transition.inProgress) {
+      if (this._activeTarget && this.transitionManager.transition.inProgress) {
         this._activeTargetOwners.add('transition');
       }
       this._releaseTargetOwner('zoom');
@@ -1538,7 +1652,7 @@ export default class MapController extends Controller<MapState> {
   protected _onDoubleClickDragEnd(event): boolean {
     const handled = super._onDoubleClickDragEnd(event);
     if (handled) {
-      if (this.transitionManager.transition.inProgress) {
+      if (this._activeTarget && this.transitionManager.transition.inProgress) {
         this._activeTargetOwners.add('transition');
       }
       this._releaseTargetOwner('zoom');
@@ -1651,6 +1765,22 @@ export default class MapController extends Controller<MapState> {
     return pos[0] >= 0 && pos[0] <= this.props.width && pos[1] >= 0 && pos[1] <= this.props.height;
   }
 
+  /** Returns the pointer/touch origin, or the first recognized trackpad sample. */
+  private _getGestureAcquisitionPosition(event): [number, number] {
+    if (event.pointerType === 'trackpad') {
+      return this.getCenter(event);
+    }
+    const deltaX = Number.isFinite(event.deltaX) ? event.deltaX : 0;
+    const deltaY = Number.isFinite(event.deltaY) ? event.deltaY : 0;
+    return this.getCenter({
+      ...event,
+      offsetCenter: {
+        x: event.offsetCenter.x - deltaX,
+        y: event.offsetCenter.y - deltaY
+      }
+    });
+  }
+
   private _acquireTarget(
     operation: MapInteractionTargetOperation,
     source: MapInteractionTargetSource,
@@ -1687,7 +1817,7 @@ export default class MapController extends Controller<MapState> {
         this.props as InternalMapControllerProps
       );
       for (const owner of owners) this._activeTargetOwners.add(owner);
-      this._installTargetState(target, operation, source);
+      this._installTargetState(target, operation, source, screenPosition);
       return target;
     } catch (error) {
       this._releaseAllTargets(true);
@@ -1724,7 +1854,8 @@ export default class MapController extends Controller<MapState> {
   private _installTargetState(
     target: MapInteractionTarget,
     operation: MapInteractionTargetOperation,
-    source: MapInteractionTargetSource
+    source: MapInteractionTargetSource,
+    inputOrigin: [number, number] | null
   ): void {
     const constraint = this.constrainInteractionTargetViewState;
     const state = this.controllerState.withInteractionTarget(target, {
@@ -1732,6 +1863,7 @@ export default class MapController extends Controller<MapState> {
       operation,
       source,
       sessionId: this._targetSessionGeneration,
+      inputOrigin,
       constrainViewState: constraint
         ? context => {
             this._targetConstraintDepth++;
@@ -1841,15 +1973,26 @@ export default class MapController extends Controller<MapState> {
       coordinate: [...targetInfo.target],
       screenPosition: [targetInfo.projectedPosition[0], targetInfo.projectedPosition[1]]
     };
+    const mode =
+      endControllerState.getState().targetNavigationOperation === 'pan' ? 'pan' : 'orbit';
     const targetSessionGeneration = this._targetSessionGeneration;
     return {
       ...transitionProps,
-      transitionInterpolator: new TargetNavigationInterpolator({
-        target,
-        startRadius: targetInfo.targetDistance,
-        endScreenPosition: [...endScreenPosition],
-        resolveFrame: (props, context) => this._resolveTargetTransitionFrame(props, context)
-      }),
+      transitionInterpolator:
+        mode === 'pan'
+          ? new TargetNavigationInterpolator({
+              mode,
+              target,
+              endScreenPosition: [...endScreenPosition],
+              resolveFrame: (props, context) => this._resolveTargetTransitionFrame(props, context)
+            })
+          : new TargetNavigationInterpolator({
+              mode,
+              target,
+              startRadius: targetInfo.targetDistance,
+              endScreenPosition: [...endScreenPosition],
+              resolveFrame: (props, context) => this._resolveTargetTransitionFrame(props, context)
+            }),
       onTransitionInterrupt: this._wrapTargetTransitionEnd(
         targetSessionGeneration,
         transitionProps.onTransitionInterrupt
@@ -1870,6 +2013,13 @@ export default class MapController extends Controller<MapState> {
       return null;
     }
     const previous = current._getUpdatedState(context.previousProps, {mode: 'preserve'});
+    if (context.mode === 'pan') {
+      const candidate = previous._getTargetPanUpdatedState(
+        context.screenPosition as [number, number],
+        {mode: 'hard'}
+      );
+      return candidate === previous ? null : candidate.getViewportProps();
+    }
     const candidate = previous._getTargetPoseUpdatedState(
       {
         bearing: props.bearing,

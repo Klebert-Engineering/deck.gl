@@ -1126,6 +1126,119 @@ describe('MapController target navigation', () => {
     harness.controller.finalize();
   });
 
+  it('translates a snapped elevated target in the world plane without a first-move jump or drift', () => {
+    const snappedPosition: [number, number] = [POINTER[0] + 18, POINTER[1] - 11];
+    let target!: MapInteractionTarget;
+    const harness = createControllerHarness({
+      controllerOptions: {_targetNavigation: true, getInteractionTarget: () => target},
+      initialViewState: {position: [250, -180, 400]}
+    });
+    target = harness.makeTarget(snappedPosition, 275);
+    const startViewport = harness.getViewport();
+    const startRadius = getTargetInfo(harness, target).targetDistance;
+    const delta: [number, number] = [120, -80];
+    const pointerPosition: [number, number] = [POINTER[0] + delta[0], POINTER[1] + delta[1]];
+    const targetPosition: [number, number] = [
+      snappedPosition[0] + delta[0],
+      snappedPosition[1] + delta[1]
+    ];
+
+    harness.controller.handleEvent(makeGestureEvent('panstart') as any);
+    harness.controller.handleEvent(
+      makeGestureEvent('panmove', pointerPosition, {deltaX: delta[0], deltaY: delta[1]}) as any
+    );
+
+    expectTargetInvariant(harness, target, targetPosition);
+    const movedViewport = harness.getViewport();
+    expect(movedViewport.center[2]).toBeCloseTo(startViewport.center[2], 10);
+    expect(movedViewport.zoom).toBe(startViewport.zoom);
+    expect(movedViewport.bearing).toBe(startViewport.bearing);
+    expect(movedViewport.pitch).toBe(startViewport.pitch);
+    expect(getTargetInfo(harness, target).targetDistance).not.toBeCloseTo(startRadius, 4);
+
+    harness.controller.handleEvent(
+      makeGestureEvent('panmove', POINTER, {deltaX: 0, deltaY: 0}) as any
+    );
+    const reversedViewport = harness.getViewport();
+    for (let index = 0; index < 3; index++) {
+      expect(reversedViewport.center[index]).toBeCloseTo(startViewport.center[index], 6);
+      expect(reversedViewport.cameraPosition[index]).toBeCloseTo(
+        startViewport.cameraPosition[index],
+        6
+      );
+    }
+    expect(reversedViewport.zoom).toBe(startViewport.zoom);
+    expect(reversedViewport.bearing).toBe(startViewport.bearing);
+    expect(reversedViewport.pitch).toBe(startViewport.pitch);
+
+    harness.controller.handleEvent(makeGestureEvent('panend') as any);
+    harness.controller.finalize();
+  });
+
+  it('reports the reconstructed pointer origin and the first recognized trackpad sample', () => {
+    let pointerTarget!: MapInteractionTarget;
+    const pointerProvider = vi.fn(() => pointerTarget);
+    const pointerHarness = createControllerHarness({
+      controllerOptions: {_targetNavigation: true, getInteractionTarget: pointerProvider}
+    });
+    pointerTarget = pointerHarness.makeTarget();
+    const recognizedPosition: [number, number] = [POINTER[0] + 12, POINTER[1] - 7];
+    pointerHarness.controller.handleEvent(
+      makeGestureEvent('panstart', recognizedPosition, {deltaX: 12, deltaY: -7}) as any
+    );
+    expect(pointerProvider).toHaveBeenCalledWith(
+      expect.objectContaining({source: 'touch', screenPosition: POINTER})
+    );
+    pointerHarness.controller.handleEvent(makeGestureEvent('panend', recognizedPosition) as any);
+    pointerHarness.controller.finalize();
+
+    let trackpadTarget!: MapInteractionTarget;
+    const trackpadProvider = vi.fn(() => trackpadTarget);
+    const trackpadHarness = createControllerHarness({
+      controllerOptions: {
+        _targetNavigation: true,
+        getInteractionTarget: trackpadProvider,
+        trackpadGesture: true
+      }
+    });
+    trackpadTarget = trackpadHarness.makeTarget(recognizedPosition);
+    trackpadHarness.controller.handleEvent(
+      makeGestureEvent('panstart', recognizedPosition, {
+        pointerType: 'trackpad',
+        deltaX: 12,
+        deltaY: -7
+      }) as any
+    );
+    expect(trackpadProvider).toHaveBeenCalledWith(
+      expect.objectContaining({source: 'trackpad', screenPosition: recognizedPosition})
+    );
+    trackpadHarness.controller.handleEvent(
+      makeGestureEvent('panend', recognizedPosition, {pointerType: 'trackpad'}) as any
+    );
+    trackpadHarness.controller.finalize();
+  });
+
+  it('does not acquire a regular trackpad pan when trackpad gestures are disabled', () => {
+    const provider = vi.fn(() => null);
+    const harness = createControllerHarness({
+      controllerOptions: {
+        _targetNavigation: true,
+        getInteractionTarget: provider,
+        trackpadGesture: false
+      }
+    });
+
+    harness.controller.handleEvent(
+      makeGestureEvent('panstart', POINTER, {pointerType: 'trackpad'}) as any
+    );
+
+    expect(provider).not.toHaveBeenCalled();
+    harness.controller.handleEvent(
+      makeGestureEvent('panend', POINTER, {pointerType: 'trackpad'}) as any
+    );
+    harness.controller.finalize();
+  });
+
   it('keeps a captured target under the pointer outside the viewport', () => {
     let target!: MapInteractionTarget;
     const harness = createControllerHarness({
@@ -1412,6 +1525,7 @@ describe('MapController target navigation', () => {
       }
     });
     target = harness.makeTarget(POINTER, 160);
+    const sourceViewport = harness.getViewport();
     const endPosition: [number, number] = [POINTER[0] + 24, POINTER[1] + 12];
 
     harness.controller.handleEvent(makeGestureEvent('panstart') as any);
@@ -1443,11 +1557,55 @@ describe('MapController target navigation', () => {
     expect(halfInfo.projectedPosition[0]).toBeLessThan(expectedEndPosition[0]);
     expect(halfInfo.projectedPosition[1]).toBeGreaterThan(endPosition[1]);
     expect(halfInfo.projectedPosition[1]).toBeLessThan(expectedEndPosition[1]);
+    const halfViewport = harness.getViewport();
+    expect(halfViewport.center[2]).toBeCloseTo(sourceViewport.center[2], 10);
+    expect(halfViewport.zoom).toBe(sourceViewport.zoom);
+    expect(halfViewport.bearing).toBe(sourceViewport.bearing);
+    expect(halfViewport.pitch).toBe(sourceViewport.pitch);
 
     harness.timeline.setTime(transitionStart + 301);
     harness.controller.updateTransition();
 
     expect((harness.controller as any).transitionManager.transition.inProgress).toBe(false);
+    expectTargetCleared(harness.interactionStates.at(-1)!);
+    harness.controller.finalize();
+  });
+
+  it('does not leak a transition owner from provider-null stock pan inertia', () => {
+    let currentTarget: MapInteractionTarget | null = null;
+    const harness = createControllerHarness({
+      controllerOptions: {
+        _targetNavigation: true,
+        getInteractionTarget: () => currentTarget,
+        inertia: 100
+      }
+    });
+    const endPosition: [number, number] = [POINTER[0] + 24, POINTER[1] + 12];
+
+    harness.controller.handleEvent(makeGestureEvent('panstart') as any);
+    harness.controller.handleEvent(
+      makeGestureEvent('panmove', endPosition, {deltaX: 24, deltaY: 12}) as any
+    );
+    const transitionStart = harness.timeline.getTime();
+    harness.controller.handleEvent(
+      makeGestureEvent('panend', endPosition, {
+        deltaX: 24,
+        deltaY: 12,
+        velocity: 0.5,
+        velocityX: 0.4,
+        velocityY: 0.2
+      }) as any
+    );
+    expect((harness.controller as any)._activeTargetOwners.size).toBe(0);
+
+    harness.timeline.setTime(transitionStart + 101);
+    harness.controller.updateTransition();
+    currentTarget = harness.makeTarget();
+    const rotateOptions = {srcEvent: {metaKey: true}};
+    harness.controller.handleEvent(makeGestureEvent('panstart', POINTER, rotateOptions) as any);
+    harness.controller.handleEvent(makeGestureEvent('panend', POINTER, rotateOptions) as any);
+
+    expect((harness.controller as any)._activeTargetOwners.size).toBe(0);
     expectTargetCleared(harness.interactionStates.at(-1)!);
     harness.controller.finalize();
   });

@@ -127,7 +127,7 @@ Returns:
 
 #### `panByPosition3D` {#panbyposition3d}
 
-Returns a new longitude and latitude that keeps a 3D world coordinate at a given screen pixel. Unlike `panByPosition`, this method correctly handles the z-component (altitude) for cameras positioned above ground, making it suitable for use during rotation around 3D pivot points.
+Returns an approximate longitude and latitude correction for moving a 3D world coordinate toward a screen pixel. This compatibility helper accounts for the coordinate's altitude in one geographic-coordinate step, but may retain visible error when the viewport has a nonzero `position`. Use [`getTargetPanViewState`](#gettargetpanviewstate) when a complete, exact target-relative planar state is required.
 
 Parameters:
 
@@ -137,6 +137,12 @@ Parameters:
 Returns:
 
 * An object with `{longitude, latitude}` representing the new viewport center.
+
+#### `getTargetPanViewState` {#gettargetpanviewstate}
+
+Reconstructs a complete canonical map view state after translating the camera parallel to the world plane. The supplied target is placed at the requested view-local `screenPosition` by translating the frozen viewport center in common-space X/Y while preserving common-space center Z, zoom, bearing, and pitch. Camera-target radius is intentionally allowed to change; use [`getTargetViewState`](#gettargetviewstate) for radius-preserving orbit or zoom.
+
+Call this method on the operation-start viewport and rebuild the returned state with the same dimensions, lens, padding, clipping, model transform, and world-copy configuration. It returns `null` for unsupported projection modes, nonfinite or singular input, and parallel, backward, or near/far-clipped pixel-ray intersections. No partial state is returned.
 
 #### `getTargetInfo` {#gettargetinfo}
 
