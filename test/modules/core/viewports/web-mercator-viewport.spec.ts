@@ -204,6 +204,93 @@ test('WebMercatorViewport#getTargetViewState moves a target pixel while orbiting
   );
 });
 
+test('WebMercatorViewport#getTargetPanViewState translates in common XY without orbiting', () => {
+  const modelMatrix = new Matrix4().rotateZ(0.2).scale([1.2, 0.8, 1.1]);
+  const viewportOptions = {
+    width: 900,
+    height: 700,
+    longitude: 8.5,
+    latitude: 47.3,
+    zoom: 13,
+    pitch: 48,
+    bearing: -30,
+    position: [120, -80, 45],
+    modelMatrix,
+    padding: {left: 70, right: 10, top: 30, bottom: 90},
+    fovy: 42,
+    nearZMultiplier: 0.02,
+    farZMultiplier: 1.05
+  };
+  const sourceViewport = new WebMercatorViewport(viewportOptions);
+  const target = sourceViewport.unproject([380, 310], {targetZ: 350}) as [number, number, number];
+  const sourceInfo = sourceViewport.getTargetInfo(target)!;
+  const screenPosition: [number, number] = [645, 190];
+
+  const state = sourceViewport.getTargetPanViewState({target, screenPosition});
+  expect(state).not.toBeNull();
+  expect(state?.zoom).toBe(sourceViewport.zoom);
+  expect(state?.bearing).toBe(sourceViewport.bearing);
+  expect(state?.pitch).toBe(sourceViewport.pitch);
+
+  const candidate = new WebMercatorViewport({...viewportOptions, ...state});
+  const candidateInfo = candidate.getTargetInfo(target)!;
+  expect(candidateInfo.isValid).toBe(true);
+  expect(
+    Math.hypot(
+      candidateInfo.projectedPosition[0] - screenPosition[0],
+      candidateInfo.projectedPosition[1] - screenPosition[1]
+    )
+  ).toBeLessThan(TARGET_REPROJECTION_TOLERANCE);
+  expect(candidate.center[2]).toBeCloseTo(sourceViewport.center[2], 10);
+  expect(Math.abs(candidateInfo.targetDistance - sourceInfo.targetDistance)).toBeGreaterThan(1);
+});
+
+test('WebMercatorViewport#getTargetPanViewState handles large center offsets and world copies', () => {
+  for (const viewportOptions of [
+    {
+      width: 1600,
+      height: 1000,
+      longitude: 13.64432155,
+      latitude: 47.72654096,
+      zoom: 14.85,
+      pitch: 0,
+      bearing: 0,
+      position: [0, 0, 2384835.59976474]
+    },
+    {
+      width: 800,
+      height: 400,
+      longitude: 0,
+      latitude: 0,
+      zoom: 0,
+      pitch: 30,
+      bearing: 20,
+      worldOffset: 1
+    }
+  ]) {
+    const sourceViewport = new WebMercatorViewport(viewportOptions);
+    const startPosition: [number, number] = [sourceViewport.width / 2, sourceViewport.height / 2];
+    const target = sourceViewport.unproject(startPosition, {targetZ: 0}) as [
+      number,
+      number,
+      number
+    ];
+    const screenPosition: [number, number] = [startPosition[0] + 20, startPosition[1] + 10];
+    const state = sourceViewport.getTargetPanViewState({target, screenPosition});
+
+    expect(state).not.toBeNull();
+    const candidate = new WebMercatorViewport({...viewportOptions, ...state});
+    const targetInfo = candidate.getTargetInfo(target)!;
+    expect(
+      Math.hypot(
+        targetInfo.projectedPosition[0] - screenPosition[0],
+        targetInfo.projectedPosition[1] - screenPosition[1]
+      )
+    ).toBeLessThan(TARGET_REPROJECTION_TOLERANCE);
+    expect(candidate.center[2]).toBeCloseTo(sourceViewport.center[2], 8);
+  }
+});
+
 test('WebMercatorViewport#getTargetViewState supports geometrically valid offscreen targets', () => {
   const viewportOptions = {
     width: 800,
@@ -372,6 +459,12 @@ test('WebMercatorViewport#getTargetViewState rejects unsupported and invalid inp
     })
   ).toBeNull();
   expect(
+    new WebMercatorViewport({...viewportOptions, orthographic: true}).getTargetPanViewState({
+      target,
+      screenPosition: [400, 300]
+    })
+  ).toBeNull();
+  expect(
     new WebMercatorViewport({
       ...viewportOptions,
       projectionMatrix: new Matrix4().perspective({fovy: 0.7, aspect: 4 / 3, near: 0.1, far: 10})
@@ -384,6 +477,7 @@ test('WebMercatorViewport#getTargetViewState rejects unsupported and invalid inp
     })
   ).toBeNull();
   expect(viewport.getTargetViewState({target, screenPosition: [Number.NaN, 300]})).toBeNull();
+  expect(viewport.getTargetPanViewState({target, screenPosition: [Number.NaN, 300]})).toBeNull();
   expect(
     viewport.getTargetViewState({target: [0, Number.NaN, 0], screenPosition: [400, 300]})
   ).toBeNull();
@@ -412,6 +506,12 @@ test('WebMercatorViewport#getTargetViewState rejects unsupported and invalid inp
   ];
   expect(
     singularModelViewport.getTargetViewState({
+      target: singularTarget,
+      screenPosition: [400, 300]
+    })
+  ).toBeNull();
+  expect(
+    singularModelViewport.getTargetPanViewState({
       target: singularTarget,
       screenPosition: [400, 300]
     })

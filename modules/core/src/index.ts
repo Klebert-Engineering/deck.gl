@@ -158,6 +158,7 @@ export type {
 } from './controllers/map-controller';
 export type {
   WebMercatorTargetInfo,
+  WebMercatorTargetPanViewStateOptions,
   WebMercatorTargetViewState,
   WebMercatorTargetViewStateOptions
 } from './viewports/web-mercator-viewport';

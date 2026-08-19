@@ -37,7 +37,10 @@ describe('TargetNavigationInterpolator', () => {
     const resolveFrame = vi.fn(
       (props: Readonly<Record<string, any>>, context: TargetNavigationTransitionContext) => {
         contexts.push(context);
-        return {...props, acceptedRadius: context.radius};
+        return {
+          ...props,
+          acceptedRadius: context.mode === 'orbit' ? context.radius : null
+        };
       }
     );
     const interpolator = new TargetNavigationInterpolator({
@@ -91,6 +94,33 @@ describe('TargetNavigationInterpolator', () => {
     expect(Object.isFrozen(contexts[0].previousProps)).toBe(true);
     expect(Object.isFrozen(contexts[0].previousProps.position)).toBe(true);
     expect('featureId' in contexts[1].target).toBe(false);
+    expect(contexts.every(context => context.mode === 'orbit')).toBe(true);
+  });
+
+  it('interpolates planar target pixels without manufacturing a radius', () => {
+    const contexts: TargetNavigationTransitionContext[] = [];
+    const interpolator = new TargetNavigationInterpolator({
+      mode: 'pan',
+      target: {coordinate: [11.25, 47.75, 125], screenPosition: [320, 240]},
+      endScreenPosition: [440, 300],
+      resolveFrame: (props, context) => {
+        contexts.push(context);
+        return {...props, acceptedMode: context.mode};
+      }
+    });
+    const {start, end} = interpolator.initializeProps(START_PROPS, END_PROPS);
+
+    expect(interpolator.interpolateProps(start, end, 0.25)).toMatchObject({
+      acceptedMode: 'pan'
+    });
+    expect(interpolator.interpolateProps(start, end, 0.5)).toMatchObject({acceptedMode: 'pan'});
+
+    expect(contexts.map(context => context.screenPosition)).toEqual([
+      [350, 255],
+      [380, 270]
+    ]);
+    expect(contexts.every(context => context.mode === 'pan')).toBe(true);
+    expect(contexts.every(context => !('radius' in context))).toBe(true);
   });
 
   it('retains the exact previous valid frame on no solution and resumes afterwards', () => {

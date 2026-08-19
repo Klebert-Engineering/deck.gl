@@ -86,6 +86,14 @@ export type WebMercatorTargetViewStateOptions = {
   zoom?: number;
 };
 
+/** Options for translating a map view parallel to the Web Mercator world plane. */
+export type WebMercatorTargetPanViewStateOptions = {
+  /** World coordinate as `[longitude, latitude, altitude]`. */
+  target: [number, number, number];
+  /** Desired target position in view-local CSS pixels. */
+  screenPosition: [number, number];
+};
+
 /** Canonical map state reconstructed by {@link WebMercatorViewport.getTargetViewState}. */
 export type WebMercatorTargetViewState = {
   /** Longitude in degrees, kept continuous with the source viewport's rendered world copy. */
@@ -412,13 +420,74 @@ export default class WebMercatorViewport extends Viewport {
   }
 
   /**
-   * Returns a new longitude and latitude that keeps a 3D world coordinate at a given screen pixel
-   * This version handles the z-component (altitude) properly for cameras positioned above ground
+   * Returns an approximate longitude and latitude that moves a 3D world coordinate toward a
+   * screen pixel. This compatibility helper applies one geographic-coordinate correction and can
+   * retain visible error for nonzero viewport `position`; use `getTargetPanViewState` when a full,
+   * exact target-relative planar map state is required.
    */
   panByPosition3D(coords: number[], pixel: number[]): WebMercatorViewportOptions {
     const targetZ = coords[2] || 0;
     const deltaLngLat = vec2.sub([], coords, this.unproject(pixel, {targetZ}));
     return {longitude: this.longitude + deltaLngLat[0], latitude: this.latitude + deltaLngLat[1]};
+  }
+
+  /**
+   * Reconstructs a canonical map state after translating the camera parallel to the world plane.
+   *
+   * Call this method on the frozen operation-start viewport. The target is placed at the supplied
+   * view-local screen position by translating the viewport center in common-space X/Y only. Zoom,
+   * bearing, pitch and common-space center Z are preserved; camera-to-target radius is deliberately
+   * not preserved. The returned state must be rebuilt with the same dimensions, lens, padding,
+   * clipping, model transform and world-copy configuration as this viewport.
+   *
+   * Returns `null` for unsupported projection modes, nonfinite/singular input, a target or desired
+   * ray-plane intersection outside the camera clip volume, or an unrepresentable map state.
+   */
+  getTargetPanViewState(
+    options: WebMercatorTargetPanViewStateOptions
+  ): WebMercatorTargetViewState | null {
+    const {target, screenPosition} = options;
+    if (!isFiniteArray(screenPosition)) {
+      return null;
+    }
+
+    const targetInfo = this.getTargetInfo(target);
+    if (!targetInfo?.isValid) {
+      return null;
+    }
+
+    try {
+      const commonTarget = this.projectPosition(targetInfo.target);
+      const intersectionXY = pixelsToWorld(
+        screenPosition,
+        this.pixelUnprojectionMatrix,
+        commonTarget[2]
+      );
+      const commonIntersection = [intersectionXY[0], intersectionXY[1], commonTarget[2]];
+      const intersectionView = new Matrix4(this.viewMatrix).transformAsPoint(commonIntersection);
+      const intersectionDepth = -intersectionView[2];
+      if (
+        !isFiniteArray(commonTarget) ||
+        !isFiniteArray(commonIntersection) ||
+        !isFiniteArray(intersectionView) ||
+        !Number.isFinite(intersectionDepth) ||
+        Math.abs(commonIntersection[2] - commonTarget[2]) >
+          MINIMUM_TARGET_SCALE * Math.max(1, Math.abs(commonTarget[2])) ||
+        intersectionDepth <= targetInfo.near ||
+        intersectionDepth >= targetInfo.far
+      ) {
+        return null;
+      }
+
+      const center = [
+        this.center[0] + commonTarget[0] - commonIntersection[0],
+        this.center[1] + commonTarget[1] - commonIntersection[1],
+        this.center[2]
+      ];
+      return this._getTargetViewStateFromCenter(center, this.bearing, this.pitch, this.zoom);
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -604,39 +673,53 @@ export default class WebMercatorViewport extends Viewport {
         return null;
       }
 
-      const [longitude, latitude] = this.unprojectFlat(center);
-      const unitsPerMeterAtCenter = unitsPerMeter(latitude);
-      if (
-        !isFiniteArray([longitude, latitude, unitsPerMeterAtCenter]) ||
-        Math.abs(latitude) >= 90 ||
-        unitsPerMeterAtCenter <= 0
-      ) {
-        return null;
-      }
-
-      let position: number[] = [0, 0, center[2] / unitsPerMeterAtCenter];
-      if (this.modelMatrix) {
-        const inverseModelMatrix = new Matrix4(this.modelMatrix);
-        if (!hasStableInverse(inverseModelMatrix)) {
-          return null;
-        }
-        position = Array.from(inverseModelMatrix.invert().transformAsVector(position));
-      }
-      if (!isFiniteArray(position)) {
-        return null;
-      }
-
-      return {
-        longitude,
-        latitude,
-        zoom,
-        bearing,
-        pitch,
-        position: position as [number, number, number]
-      };
+      return this._getTargetViewStateFromCenter(center, bearing, pitch, zoom);
     } catch {
       return null;
     }
+  }
+
+  /** Converts a common-space viewport center into the canonical public map-state fields. */
+  private _getTargetViewStateFromCenter(
+    center: number[],
+    bearing: number,
+    pitch: number,
+    zoom: number
+  ): WebMercatorTargetViewState | null {
+    if (!isFiniteArray(center) || !isFiniteArray([bearing, pitch, zoom])) {
+      return null;
+    }
+
+    const [longitude, latitude] = this.unprojectFlat(center);
+    const unitsPerMeterAtCenter = unitsPerMeter(latitude);
+    if (
+      !isFiniteArray([longitude, latitude, unitsPerMeterAtCenter]) ||
+      Math.abs(latitude) >= 90 ||
+      unitsPerMeterAtCenter <= 0
+    ) {
+      return null;
+    }
+
+    let position: number[] = [0, 0, center[2] / unitsPerMeterAtCenter];
+    if (this.modelMatrix) {
+      const inverseModelMatrix = new Matrix4(this.modelMatrix);
+      if (!hasStableInverse(inverseModelMatrix)) {
+        return null;
+      }
+      position = Array.from(inverseModelMatrix.invert().transformAsVector(position));
+    }
+    if (!isFiniteArray(position)) {
+      return null;
+    }
+
+    return {
+      longitude,
+      latitude,
+      zoom,
+      bearing,
+      pitch,
+      position: position as [number, number, number]
+    };
   }
 
   getBounds(options: {z?: number} = {}): [number, number, number, number] {

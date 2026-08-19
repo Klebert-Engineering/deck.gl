@@ -26,12 +26,12 @@ type FrozenMapInteractionTarget = {
   readonly screenPosition: readonly [number, number];
 };
 
-/** Numeric metadata retained for one target-aware map transition. */
-export type TargetNavigationTransitionContext = {
+/** Camera invariant used to reconstruct target-aware transition frames. */
+export type TargetNavigationTransitionMode = 'orbit' | 'pan';
+
+type TargetNavigationTransitionContextBase = {
   /** Frozen world coordinate and view-local screen position acquired before the transition. */
   readonly target: FrozenMapInteractionTarget;
-  /** Desired camera-to-target radius for this frame. */
-  readonly radius: number;
   /** Desired view-local target pixel for this frame. */
   readonly screenPosition: readonly [number, number];
   /** Interpolation progress in the range supplied by the transition manager. */
@@ -39,6 +39,19 @@ export type TargetNavigationTransitionContext = {
   /** Most recently accepted frame, or the current view state before the first accepted frame. */
   readonly previousProps: Readonly<Record<string, any>>;
 };
+
+/** Numeric metadata retained for one target-aware map transition. */
+export type TargetNavigationTransitionContext =
+  | (TargetNavigationTransitionContextBase & {
+      /** Radius-preserving orbit/zoom frame. */
+      readonly mode: 'orbit';
+      /** Desired camera-to-target radius for this frame. */
+      readonly radius: number;
+    })
+  | (TargetNavigationTransitionContextBase & {
+      /** Common-XY target-pan frame. */
+      readonly mode: 'pan';
+    });
 
 /**
  * Applies the target-relative camera transform and validates its result.
@@ -52,11 +65,9 @@ export type ResolveTargetNavigationTransitionFrame = (
   context: TargetNavigationTransitionContext
 ) => Record<string, any> | null;
 
-export type TargetNavigationInterpolatorOptions = {
+type TargetNavigationInterpolatorOptionsBase = {
   /** Numeric target snapshot retained for the entire transition. */
   target: MapInteractionTarget;
-  /** Perspective camera-to-target radius at the start of the transition. */
-  startRadius: number;
   /** View-local target pixel at the transition endpoint. Defaults to the start pixel. */
   endScreenPosition?: [number, number];
   /** Applies the camera transform, controller constraints and invariant validation. */
@@ -64,6 +75,21 @@ export type TargetNavigationInterpolatorOptions = {
   /** Map view-state properties to interpolate. Defaults to the standard MapController set. */
   transitionProps?: TransitionProps;
 };
+
+export type TargetNavigationInterpolatorOptions = TargetNavigationInterpolatorOptionsBase &
+  (
+    | {
+        /** Radius-preserving orbit/zoom transition. This is the compatibility default. */
+        mode?: 'orbit';
+        /** Perspective camera-to-target radius at the start of the transition. */
+        startRadius: number;
+      }
+    | {
+        /** Common-XY target-pan transition. */
+        mode: 'pan';
+        startRadius?: never;
+      }
+  );
 
 function copyTransitionProps(props: Readonly<Record<string, any>>): Record<string, any> {
   const result: Record<string, any> = {};
@@ -105,7 +131,8 @@ function isFiniteTuple(value: unknown, length: number): value is number[] {
  */
 export default class TargetNavigationInterpolator extends LinearInterpolator {
   readonly target: FrozenMapInteractionTarget;
-  readonly startRadius: number;
+  readonly mode: TargetNavigationTransitionMode;
+  readonly startRadius: number | null;
 
   private readonly resolveFrame: ResolveTargetNavigationTransitionFrame;
   private readonly endScreenPosition: readonly [number, number];
@@ -119,10 +146,13 @@ export default class TargetNavigationInterpolator extends LinearInterpolator {
       isFiniteTuple(options.target.screenPosition, 2),
       'target screen position must be finite'
     );
-    assert(
-      Number.isFinite(options.startRadius) && options.startRadius > 0,
-      'start radius must be positive and finite'
-    );
+    const mode = options.mode || 'orbit';
+    if (mode === 'orbit') {
+      assert(
+        Number.isFinite(options.startRadius) && Number(options.startRadius) > 0,
+        'start radius must be positive and finite'
+      );
+    }
     assert(
       !options.endScreenPosition || isFiniteTuple(options.endScreenPosition, 2),
       'end screen position must be finite'
@@ -137,7 +167,8 @@ export default class TargetNavigationInterpolator extends LinearInterpolator {
       ],
       screenPosition: Object.freeze([...options.target.screenPosition]) as readonly [number, number]
     });
-    this.startRadius = options.startRadius;
+    this.mode = mode;
+    this.startRadius = options.mode === 'pan' ? null : options.startRadius;
     this.endScreenPosition = Object.freeze([
       ...(options.endScreenPosition || options.target.screenPosition)
     ]) as readonly [number, number];
@@ -175,15 +206,23 @@ export default class TargetNavigationInterpolator extends LinearInterpolator {
       return this.lastAcceptedProps;
     }
 
-    const resolvedFrame = this.resolveFrame(freezeTransitionProps(interpolatedProps), {
+    const contextBase: TargetNavigationTransitionContextBase = {
       target: this.target,
-      radius: this.startRadius * 2 ** (startZoom - zoom),
       screenPosition: Object.freeze(
         lerp([...this.target.screenPosition], [...this.endScreenPosition], t) as number[]
       ) as readonly [number, number],
       progress: t,
       previousProps: freezeTransitionProps(this.lastAcceptedProps)
-    });
+    };
+    const context: TargetNavigationTransitionContext =
+      this.mode === 'pan'
+        ? {...contextBase, mode: 'pan'}
+        : {
+            ...contextBase,
+            mode: 'orbit',
+            radius: this.startRadius! * 2 ** (startZoom - zoom)
+          };
+    const resolvedFrame = this.resolveFrame(freezeTransitionProps(interpolatedProps), context);
 
     if (resolvedFrame) {
       this.lastAcceptedProps = copyTransitionProps(resolvedFrame);
