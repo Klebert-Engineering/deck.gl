@@ -204,6 +204,108 @@ test('WebMercatorViewport#getTargetViewState moves a target pixel while orbiting
   );
 });
 
+test('WebMercatorViewport#getTargetViewState enforces an exact metric target-distance floor', () => {
+  const viewportOptions = {
+    width: 900,
+    height: 700,
+    longitude: 8.5,
+    latitude: 47.3,
+    zoom: 13,
+    pitch: 48,
+    bearing: -30
+  };
+  const sourceViewport = new WebMercatorViewport(viewportOptions);
+  const screenPosition: [number, number] = [380, 310];
+  const target = sourceViewport.unproject(screenPosition, {targetZ: 350}) as [
+    number,
+    number,
+    number
+  ];
+  const sourceDistance = sourceViewport.getTargetInfo(target)!.targetDistance;
+  const minimumTargetDistance = sourceDistance / 4;
+
+  const directState = sourceViewport.getTargetViewState({
+    target,
+    screenPosition,
+    zoom: sourceViewport.zoom + 8,
+    minimumTargetDistance
+  });
+  const incrementalStates = [1, 2, 4, 8].map(zoomDelta =>
+    sourceViewport.getTargetViewState({
+      target,
+      screenPosition,
+      zoom: sourceViewport.zoom + zoomDelta,
+      minimumTargetDistance
+    })
+  );
+
+  expect(directState).not.toBeNull();
+  expect(directState!.zoom).toBeCloseTo(sourceViewport.zoom + 2, 12);
+  expect(incrementalStates.every(Boolean)).toBe(true);
+  expect(incrementalStates.at(-1)!.zoom).toBeCloseTo(directState!.zoom, 12);
+  const candidate = new WebMercatorViewport({...viewportOptions, ...directState});
+  const targetInfo = candidate.getTargetInfo(target)!;
+  expect(targetInfo.targetDistance).toBeCloseTo(minimumTargetDistance, 6);
+  expect(targetInfo.projectedPosition[0]).toBeCloseTo(screenPosition[0], 6);
+  expect(targetInfo.projectedPosition[1]).toBeCloseTo(screenPosition[1], 6);
+
+  const disabledState = sourceViewport.getTargetViewState({
+    target,
+    screenPosition,
+    zoom: sourceViewport.zoom + 1,
+    minimumTargetDistance: 0
+  });
+  const omittedState = sourceViewport.getTargetViewState({
+    target,
+    screenPosition,
+    zoom: sourceViewport.zoom + 1
+  });
+  expect(disabledState).toEqual(omittedState);
+});
+
+test('WebMercatorViewport#getTargetViewState does not jump outwards when starting inside the floor', () => {
+  const viewportOptions = {
+    width: 800,
+    height: 600,
+    longitude: 8.5,
+    latitude: 47.3,
+    zoom: 13,
+    pitch: 50,
+    bearing: 20
+  };
+  const sourceViewport = new WebMercatorViewport(viewportOptions);
+  const screenPosition: [number, number] = [300, 260];
+  const target = sourceViewport.unproject(screenPosition, {targetZ: 200}) as [
+    number,
+    number,
+    number
+  ];
+  const sourceDistance = sourceViewport.getTargetInfo(target)!.targetDistance;
+  const minimumTargetDistance = sourceDistance * 2;
+
+  const zoomInState = sourceViewport.getTargetViewState({
+    target,
+    screenPosition,
+    zoom: sourceViewport.zoom + 4,
+    minimumTargetDistance
+  });
+  expect(zoomInState).not.toBeNull();
+  expect(zoomInState!.zoom).toBeCloseTo(sourceViewport.zoom, 12);
+  const zoomInViewport = new WebMercatorViewport({...viewportOptions, ...zoomInState});
+  expect(zoomInViewport.getTargetInfo(target)!.targetDistance).toBeCloseTo(sourceDistance, 6);
+
+  const zoomOutState = sourceViewport.getTargetViewState({
+    target,
+    screenPosition,
+    zoom: sourceViewport.zoom - 1,
+    minimumTargetDistance
+  });
+  expect(zoomOutState).not.toBeNull();
+  expect(zoomOutState!.zoom).toBeCloseTo(sourceViewport.zoom - 1, 12);
+  const zoomOutViewport = new WebMercatorViewport({...viewportOptions, ...zoomOutState});
+  expect(zoomOutViewport.getTargetInfo(target)!.targetDistance).toBeCloseTo(sourceDistance * 2, 6);
+});
+
 test('WebMercatorViewport#getTargetPanViewState translates in common XY without orbiting', () => {
   const modelMatrix = new Matrix4().rotateZ(0.2).scale([1.2, 0.8, 1.1]);
   const viewportOptions = {
@@ -484,6 +586,21 @@ test('WebMercatorViewport#getTargetViewState rejects unsupported and invalid inp
   expect(
     viewport.getTargetViewState({target, screenPosition: [400, 300], zoom: Infinity})
   ).toBeNull();
+  for (const minimumTargetDistance of [
+    -1,
+    Number.NaN,
+    Infinity,
+    null as unknown as number,
+    '20' as unknown as number
+  ]) {
+    expect(
+      viewport.getTargetViewState({
+        target,
+        screenPosition: [400, 300],
+        minimumTargetDistance
+      })
+    ).toBeNull();
+  }
 
   const targetAtCamera = viewport.unprojectPosition(viewport.cameraPosition) as [
     number,
