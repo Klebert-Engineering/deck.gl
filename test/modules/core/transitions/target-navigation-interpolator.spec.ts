@@ -123,6 +123,64 @@ describe('TargetNavigationInterpolator', () => {
     expect(contexts.every(context => !('radius' in context))).toBe(true);
   });
 
+  it('clamps orbit radii to the frozen session floor without moving an inside start outwards', () => {
+    const outsideContexts: TargetNavigationTransitionContext[] = [];
+    const outside = new TargetNavigationInterpolator({
+      target: {
+        coordinate: [11.25, 47.75, 125],
+        screenPosition: [320, 240],
+        minimumTargetDistance: 60
+      },
+      startRadius: 100,
+      resolveFrame: (props, context) => {
+        outsideContexts.push(context);
+        return {...props};
+      }
+    });
+    const outsideProps = outside.initializeProps(START_PROPS, {...END_PROPS, zoom: 14});
+    outside.interpolateProps(outsideProps.start, outsideProps.end, 0.25);
+    outside.interpolateProps(outsideProps.start, outsideProps.end, 0.75);
+    expect(
+      outsideContexts.map(context => (context.mode === 'orbit' ? context.radius : null))
+    ).toEqual([60, 60]);
+    expect(outsideContexts[0].target.minimumTargetDistance).toBe(60);
+
+    const insideContexts: TargetNavigationTransitionContext[] = [];
+    const inside = new TargetNavigationInterpolator({
+      target: {
+        coordinate: [11.25, 47.75, 125],
+        screenPosition: [320, 240],
+        minimumTargetDistance: 120
+      },
+      startRadius: 80,
+      resolveFrame: (props, context) => {
+        insideContexts.push(context);
+        return {...props};
+      }
+    });
+    const insideProps = inside.initializeProps(START_PROPS, {...END_PROPS, zoom: 14});
+    inside.interpolateProps(insideProps.start, insideProps.end, 0.5);
+    expect(insideContexts[0].mode === 'orbit' && insideContexts[0].radius).toBe(80);
+  });
+
+  it.each([-1, Number.NaN, Infinity, null as unknown as number, '20' as unknown as number])(
+    'rejects invalid minimum target distance %s',
+    minimumTargetDistance => {
+      expect(
+        () =>
+          new TargetNavigationInterpolator({
+            target: {
+              coordinate: [11.25, 47.75, 125],
+              screenPosition: [320, 240],
+              minimumTargetDistance
+            },
+            startRadius: 100,
+            resolveFrame: props => ({...props})
+          })
+      ).toThrow('minimum target distance must be non-negative and finite');
+    }
+  );
+
   it('retains the exact previous valid frame on no solution and resumes afterwards', () => {
     let callbackResult: Record<string, any> | null = null;
     const resolveFrame: ResolveTargetNavigationTransitionFrame = (props, {progress}) => {

@@ -157,6 +157,8 @@ A target dragged outside the viewport can therefore remain valid even though it 
 
 Reconstructs a canonical map view state around a numeric target at the requested view-local `screenPosition`. This pixel is independent of the target's position in the source viewport: it may move between calls and may be outside the viewport. The optional `bearing`, `pitch`, and `zoom` fields default to the source viewport. A zoom change scales the physical camera-to-target radius by `2 ** (sourceZoom - requestedZoom)`; changing only bearing or pitch therefore performs a rigid orbit.
 
+`minimumTargetDistance` optionally sets a non-negative physical camera-to-target floor in metres. `0` or omission disables it. Zoom-in is clamped analytically at that floor, and the returned `zoom` is the effective value after clamping. If the source camera is already closer than the requested minimum, its source distance is used as the floor so the operation does not jump outwards. Zoom-out is unaffected. A negative or nonfinite minimum returns `null`.
+
 Call this method on the operation-start viewport and reuse that viewport for all frames in one interaction. Reconstruct the returned state with the same lens, padding, clipping, model transform, and world-copy configuration before validating it. The method returns `null` when there is no finite supported representation, including a source target behind or outside the clip volume.
 
 The first experimental version supports standard perspective `WebMercatorViewport`. Orthographic mode and custom projection matrices are intentionally unsupported and return `null`. Picking is not performed by this viewport method, so asynchronous/WebGPU picking does not affect the calculation once the application already has a numeric target.

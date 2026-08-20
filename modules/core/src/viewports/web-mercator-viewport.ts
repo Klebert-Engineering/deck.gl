@@ -84,6 +84,12 @@ export type WebMercatorTargetViewStateOptions = {
   pitch?: number;
   /** Requested map zoom. Defaults to the source viewport's zoom. */
   zoom?: number;
+  /**
+   * Optional minimum physical camera-to-target distance in metres. `0` disables the limit.
+   * Zoom-in requests stop exactly at this distance. If the source camera is already closer,
+   * zooming in preserves its current distance instead of moving the camera outwards.
+   */
+  minimumTargetDistance?: number;
 };
 
 /** Options for translating a map view parallel to the Web Mercator world plane. */
@@ -100,7 +106,7 @@ export type WebMercatorTargetViewState = {
   longitude: number;
   /** Latitude in degrees. */
   latitude: number;
-  /** Requested map zoom. */
+  /** Effective map zoom after applying the optional minimum target distance. */
   zoom: number;
   /** Requested map bearing in degrees. */
   bearing: number;
@@ -579,8 +585,14 @@ export default class WebMercatorViewport extends Viewport {
     const {target, screenPosition} = options;
     const bearing = options.bearing ?? this.bearing;
     const pitch = options.pitch ?? this.pitch;
-    const zoom = options.zoom ?? this.zoom;
-    if (!isFiniteArray(screenPosition) || !isFiniteArray([bearing, pitch, zoom])) {
+    const requestedZoom = options.zoom ?? this.zoom;
+    const requestedMinimumTargetDistance =
+      options.minimumTargetDistance === undefined ? 0 : options.minimumTargetDistance;
+    if (
+      !isFiniteArray(screenPosition) ||
+      !isFiniteArray([bearing, pitch, requestedZoom, requestedMinimumTargetDistance]) ||
+      requestedMinimumTargetDistance < 0
+    ) {
       return null;
     }
 
@@ -597,15 +609,30 @@ export default class WebMercatorViewport extends Viewport {
         ...this.cameraPosition.map(Math.abs)
       );
       const metersPerCommonUnit = 1 / unitsPerMeter(targetInfo.target[1]);
-      const minimumTargetDistance = Math.max(
+      const minimumRepresentableTargetDistance = Math.max(
         MINIMUM_TARGET_SCALE * sceneScale * Math.abs(metersPerCommonUnit),
         targetInfo.near * Math.abs(metersPerCommonUnit) * 1e-9
       );
       if (
         !Number.isFinite(metersPerCommonUnit) ||
-        targetInfo.targetDistance <= minimumTargetDistance
+        targetInfo.targetDistance <= minimumRepresentableTargetDistance
       ) {
         return null;
+      }
+
+      // Target distance follows D = D0 * 2 ** (sourceZoom - requestedZoom). Solving this
+      // expression for zoom yields an exact upper bound and keeps coarse and fine input streams
+      // convergent. The acquisition distance is the floor when the camera starts inside the
+      // requested limit, which prevents an unexpected outward jump.
+      let zoom = requestedZoom;
+      if (requestedMinimumTargetDistance > 0) {
+        const sessionMinimumTargetDistance = Math.min(
+          requestedMinimumTargetDistance,
+          targetInfo.targetDistance
+        );
+        const maximumZoom =
+          this.zoom + Math.log2(targetInfo.targetDistance / sessionMinimumTargetDistance);
+        zoom = Math.min(zoom, maximumZoom);
       }
 
       const scale = Math.pow(2, zoom);

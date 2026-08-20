@@ -324,7 +324,11 @@ describe('MapController target navigation', () => {
       controllerOptions: {_targetNavigation: true, getInteractionTarget: provider},
       pickPosition
     });
-    target = {...harness.makeTarget([POINTER[0] + 6, POINTER[1] - 4]), featureId: 'road-1'};
+    target = {
+      ...harness.makeTarget([POINTER[0] + 6, POINTER[1] - 4]),
+      minimumTargetDistance: 40,
+      featureId: 'road-1'
+    };
     const expectedCoordinate = [...target.coordinate];
 
     harness.controller.handleEvent(makeGestureEvent('panstart') as any);
@@ -341,10 +345,13 @@ describe('MapController target navigation', () => {
       interactionTargetPosition: expectedCoordinate
     });
     expect('featureId' in harness.getInteractionState()).toBe(false);
+    expect((harness.controller as any)._activeTarget.minimumTargetDistance).toBe(40);
 
     target.coordinate[0] = 0;
     target.screenPosition[0] = 0;
+    target.minimumTargetDistance = 0;
     expect(harness.getInteractionState().interactionTargetPosition).toEqual(expectedCoordinate);
+    expect((harness.controller as any)._activeTarget.minimumTargetDistance).toBe(40);
 
     harness.controller.handleEvent(makeGestureEvent('panend') as any);
     expectTargetCleared(harness.interactionStates.at(-1)!);
@@ -405,6 +412,31 @@ describe('MapController target navigation', () => {
 
     harness.controller.finalize();
   });
+
+  it.each([-1, Number.NaN, Infinity, null as unknown as number, '20' as unknown as number])(
+    'rejects invalid minimum target distance %s without built-in fallback',
+    minimumTargetDistance => {
+      const stock = createControllerHarness();
+      let target!: MapInteractionTarget;
+      const provider = vi.fn(() => ({...target, minimumTargetDistance}));
+      const pickPosition = vi.fn(() => ({coordinate: [0, 0, 0]}));
+      const harness = createControllerHarness({
+        controllerOptions: {_targetNavigation: true, getInteractionTarget: provider},
+        pickPosition
+      });
+      target = harness.makeTarget();
+
+      runPan(stock.controller);
+      runPan(harness.controller);
+
+      expect(provider).toHaveBeenCalledTimes(1);
+      expect(pickPosition).not.toHaveBeenCalled();
+      expect(harness.getViewportProps()).toEqual(stock.getViewportProps());
+      expect(harness.interactionStates.some(state => state.interactionTargetPosition)).toBe(false);
+      stock.controller.finalize();
+      harness.controller.finalize();
+    }
+  );
 
   it('discards a provider result when the provider reconfigures the controller', () => {
     let target!: MapInteractionTarget;
@@ -1324,6 +1356,47 @@ describe('MapController target navigation', () => {
       startInfo.targetDistance * 2 ** (startZoom - zoom)
     );
 
+    harness.controller.finalize();
+  });
+
+  it('stops target-relative wheel zoom at the metric target-distance floor', () => {
+    let target!: MapInteractionTarget;
+    const harness = createControllerHarness({
+      controllerOptions: {_targetNavigation: true, getInteractionTarget: () => target}
+    });
+    const baseTarget = harness.makeTarget(POINTER, 210);
+    const startInfo = getTargetInfo(harness, baseTarget);
+    const startZoom = harness.getViewportProps().zoom;
+    const minimumTargetDistance = startInfo.targetDistance / 2;
+    target = {...baseTarget, minimumTargetDistance};
+
+    harness.controller.handleEvent(makeWheelEvent(1000) as any);
+
+    expect(harness.getViewportProps().zoom).toBeCloseTo(startZoom + 1, 3);
+    expectTargetInvariant(harness, target, POINTER);
+    const stoppedDistance = getTargetInfo(harness, target).targetDistance;
+    expect(stoppedDistance).toBeGreaterThanOrEqual(minimumTargetDistance - 0.01);
+    expect(stoppedDistance - minimumTargetDistance).toBeLessThan(minimumTargetDistance * 1e-3);
+    harness.controller.finalize();
+  });
+
+  it('preserves an inside acquisition distance on zoom-in and still permits zoom-out', () => {
+    let target!: MapInteractionTarget;
+    const harness = createControllerHarness({
+      controllerOptions: {_targetNavigation: true, getInteractionTarget: () => target}
+    });
+    const baseTarget = harness.makeTarget(POINTER, 210);
+    const startInfo = getTargetInfo(harness, baseTarget);
+    const startZoom = harness.getViewportProps().zoom;
+    target = {...baseTarget, minimumTargetDistance: startInfo.targetDistance * 2};
+
+    harness.controller.handleEvent(makeWheelEvent(1000) as any);
+    expect(harness.getViewportProps().zoom).toBeCloseTo(startZoom, 10);
+    expectTargetInvariant(harness, target, POINTER, startInfo.targetDistance);
+
+    harness.controller.handleEvent(makeWheelEvent(-1000) as any);
+    expect(harness.getViewportProps().zoom).toBeLessThan(startZoom);
+    expect(getTargetInfo(harness, target).targetDistance).toBeGreaterThan(startInfo.targetDistance);
     harness.controller.finalize();
   });
 

@@ -101,6 +101,14 @@ function getTargetViewStructure(props: InternalMapControllerProps): TargetViewSt
 export type MapInteractionTarget = {
   coordinate: [longitude: number, latitude: number, altitude: number];
   screenPosition: [x: number, y: number];
+  /**
+   * Optional minimum physical camera-to-target distance in metres.
+   *
+   * The value is frozen for the target-navigation session. `0` disables the limit. If the
+   * camera starts closer than the requested distance, zooming in cannot reduce the current
+   * distance but does not move the camera outwards.
+   */
+  minimumTargetDistance?: number;
 };
 
 /** Target-anchored map operation being acquired. */
@@ -456,7 +464,13 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
   ): MapState {
     const coordinate = Object.freeze([...target.coordinate]) as unknown as [number, number, number];
     const screenPosition = Object.freeze([...target.screenPosition]) as unknown as [number, number];
-    const interactionTarget = Object.freeze({coordinate, screenPosition}) as MapInteractionTarget;
+    const interactionTarget = Object.freeze({
+      coordinate,
+      screenPosition,
+      ...(target.minimumTargetDistance === undefined
+        ? {}
+        : {minimumTargetDistance: target.minimumTargetDistance})
+    }) as MapInteractionTarget;
     const targetNavigationStartViewport = this._getTargetViewport() || undefined;
     const startTargetInfo = targetNavigationStartViewport?.getTargetInfo(coordinate);
     const targetNavigationStartTargetInfo = startTargetInfo
@@ -1121,7 +1135,8 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
       screenPosition,
       bearing,
       pitch,
-      zoom
+      zoom,
+      minimumTargetDistance: interactionTarget.minimumTargetDistance
     });
     if (!targetViewState) {
       return this;
@@ -1135,9 +1150,10 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
       return this;
     }
 
-    const expectedDistance = expectedDistanceOverride
-      ? expectedDistanceOverride * 2 ** (targetViewState.zoom - constrainedViewState.zoom)
-      : sourceTargetInfo.targetDistance * 2 ** (startProps.zoom - constrainedViewState.zoom);
+    const expectedDistance =
+      expectedDistanceOverride !== undefined
+        ? expectedDistanceOverride * 2 ** (targetViewState.zoom - constrainedViewState.zoom)
+        : sourceTargetInfo.targetDistance * 2 ** (startProps.zoom - constrainedViewState.zoom);
     return this._getTargetUpdatedState(
       constrainedViewState,
       screenPosition,
@@ -1163,7 +1179,10 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
 
     const candidateTarget = Object.freeze({
       coordinate: interactionTarget.coordinate,
-      screenPosition: Object.freeze([...screenPosition]) as [number, number]
+      screenPosition: Object.freeze([...screenPosition]) as [number, number],
+      ...(interactionTarget.minimumTargetDistance === undefined
+        ? {}
+        : {minimumTargetDistance: interactionTarget.minimumTargetDistance})
     }) as Readonly<MapInteractionTarget>;
     const applicationViewState = state.targetNavigationConstraint(
       Object.freeze({
@@ -1231,6 +1250,28 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
       if (
         !Number.isFinite(expectedDistance) ||
         Math.abs(targetInfo.targetDistance - expectedDistance) > radiusTolerance
+      ) {
+        return this;
+      }
+    }
+
+    const minimumTargetDistance = interactionTarget.minimumTargetDistance;
+    const startTargetDistance = this.getState().targetNavigationStartTargetInfo?.targetDistance;
+    if (
+      minimumTargetDistance !== undefined &&
+      minimumTargetDistance > 0 &&
+      startTargetDistance !== undefined
+    ) {
+      // Never jump a camera that acquired its target inside the configured limit outwards. Such
+      // sessions instead preserve their acquisition distance as the effective floor.
+      const sessionMinimum = Math.min(minimumTargetDistance, startTargetDistance);
+      const distanceTolerance = Math.max(
+        TARGET_RADIUS_ABSOLUTE_TOLERANCE,
+        TARGET_RADIUS_RELATIVE_TOLERANCE * sessionMinimum
+      );
+      if (
+        !Number.isFinite(targetInfo.targetDistance) ||
+        targetInfo.targetDistance < sessionMinimum - distanceTolerance
       ) {
         return this;
       }
@@ -1737,7 +1778,9 @@ export default class MapController extends Controller<MapState> {
       !target.coordinate.every(Number.isFinite) ||
       !Array.isArray(target.screenPosition) ||
       target.screenPosition.length !== 2 ||
-      !target.screenPosition.every(Number.isFinite)
+      !target.screenPosition.every(Number.isFinite) ||
+      (target.minimumTargetDistance !== undefined &&
+        (!Number.isFinite(target.minimumTargetDistance) || target.minimumTargetDistance < 0))
     ) {
       return null;
     }
@@ -1757,7 +1800,10 @@ export default class MapController extends Controller<MapState> {
     }
     return {
       coordinate: [...targetInfo.target],
-      screenPosition: [...target.screenPosition]
+      screenPosition: [...target.screenPosition],
+      ...(target.minimumTargetDistance === undefined
+        ? {}
+        : {minimumTargetDistance: target.minimumTargetDistance})
     };
   }
 
@@ -1971,7 +2017,10 @@ export default class MapController extends Controller<MapState> {
 
     const target: MapInteractionTarget = {
       coordinate: [...targetInfo.target],
-      screenPosition: [targetInfo.projectedPosition[0], targetInfo.projectedPosition[1]]
+      screenPosition: [targetInfo.projectedPosition[0], targetInfo.projectedPosition[1]],
+      ...(this._activeTarget.minimumTargetDistance === undefined
+        ? {}
+        : {minimumTargetDistance: this._activeTarget.minimumTargetDistance})
     };
     const mode =
       endControllerState.getState().targetNavigationOperation === 'pan' ? 'pan' : 'orbit';

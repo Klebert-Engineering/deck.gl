@@ -24,6 +24,7 @@ type TransitionProps =
 type FrozenMapInteractionTarget = {
   readonly coordinate: readonly [number, number, number];
   readonly screenPosition: readonly [number, number];
+  readonly minimumTargetDistance?: number;
 };
 
 /** Camera invariant used to reconstruct target-aware transition frames. */
@@ -136,6 +137,7 @@ export default class TargetNavigationInterpolator extends LinearInterpolator {
 
   private readonly resolveFrame: ResolveTargetNavigationTransitionFrame;
   private readonly endScreenPosition: readonly [number, number];
+  private readonly minimumRadius: number;
   private lastAcceptedProps: Record<string, any> | null = null;
 
   constructor(options: TargetNavigationInterpolatorOptions) {
@@ -145,6 +147,12 @@ export default class TargetNavigationInterpolator extends LinearInterpolator {
     assert(
       isFiniteTuple(options.target.screenPosition, 2),
       'target screen position must be finite'
+    );
+    assert(
+      options.target.minimumTargetDistance === undefined ||
+        (Number.isFinite(options.target.minimumTargetDistance) &&
+          options.target.minimumTargetDistance >= 0),
+      'minimum target distance must be non-negative and finite'
     );
     const mode = options.mode || 'orbit';
     if (mode === 'orbit') {
@@ -165,10 +173,20 @@ export default class TargetNavigationInterpolator extends LinearInterpolator {
         number,
         number
       ],
-      screenPosition: Object.freeze([...options.target.screenPosition]) as readonly [number, number]
+      screenPosition: Object.freeze([...options.target.screenPosition]) as readonly [
+        number,
+        number
+      ],
+      ...(options.target.minimumTargetDistance === undefined
+        ? {}
+        : {minimumTargetDistance: options.target.minimumTargetDistance})
     });
     this.mode = mode;
     this.startRadius = options.mode === 'pan' ? null : options.startRadius;
+    this.minimumRadius =
+      mode === 'orbit' && options.target.minimumTargetDistance
+        ? Math.min(options.startRadius!, options.target.minimumTargetDistance)
+        : 0;
     this.endScreenPosition = Object.freeze([
       ...(options.endScreenPosition || options.target.screenPosition)
     ]) as readonly [number, number];
@@ -220,7 +238,7 @@ export default class TargetNavigationInterpolator extends LinearInterpolator {
         : {
             ...contextBase,
             mode: 'orbit',
-            radius: this.startRadius! * 2 ** (startZoom - zoom)
+            radius: Math.max(this.startRadius! * 2 ** (startZoom - zoom), this.minimumRadius)
           };
     const resolvedFrame = this.resolveFrame(freezeTransitionProps(interpolatedProps), context);
 
