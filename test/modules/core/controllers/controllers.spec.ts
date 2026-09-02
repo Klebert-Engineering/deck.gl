@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) vis.gl contributors
 
-import {test, expect} from 'vitest';
+import {test, expect, vi} from 'vitest';
 import {
   type ControllerProps,
+  type InteractionState,
   LinearInterpolator,
+  MapController,
   MapView,
   OrbitView,
   OrthographicView,
@@ -15,6 +17,12 @@ import {
 import {Timeline} from '@luma.gl/engine';
 
 import testController, {createTestController} from './test-controller';
+
+class InteractionStateTestController extends MapController {
+  setInteractionState(state: InteractionState): void {
+    this._setInteractionState(state);
+  }
+}
 
 const makeDoubleClickDragEvent = (type: string, y: number, scale: number = 1) => ({
   type,
@@ -62,6 +70,62 @@ test('MapController', async () => {
     pitch: 30,
     bearing: -45
   });
+});
+
+test('Controller attributes persistent interaction state to its active view', () => {
+  const interactionStates: InteractionState[] = [];
+  const viewStateInteractionStates: InteractionState[] = [];
+  const controller = createTestController({
+    view: new MapView({controller: InteractionStateTestController}),
+    initialViewState: {
+      longitude: -122.45,
+      latitude: 37.78,
+      zoom: 10,
+      pitch: 30,
+      bearing: -45
+    },
+    onStateChange: state => interactionStates.push({...state}),
+    onViewStateChange: params => {
+      viewStateInteractionStates.push({...params.interactionState});
+    }
+  });
+
+  controller.setInteractionState({interactionTargetPosition: [-122.4, 37.8, 100]});
+  controller.handleEvent(makeGestureEvent('panstart') as any);
+
+  expect(interactionStates.every(state => state.viewId === 'test-view')).toBe(true);
+  expect(viewStateInteractionStates.every(state => state.viewId === 'test-view')).toBe(true);
+  expect(interactionStates.at(-1)?.interactionTargetPosition).toEqual([-122.4, 37.8, 100]);
+
+  controller.setInteractionState({interactionTargetPosition: undefined});
+  const clearedState = interactionStates.at(-1)!;
+  expect(Object.hasOwn(clearedState, 'interactionTargetPosition')).toBe(true);
+  expect(clearedState.interactionTargetPosition).toBeUndefined();
+
+  controller.setProps({...controller.props, id: 'replacement-view'});
+  controller.setInteractionState({isDragging: false});
+  expect(interactionStates.at(-1)?.viewId).toBe('replacement-view');
+  controller.finalize();
+});
+
+test('Controller#finalize clears a pending event-block timeout', () => {
+  vi.useFakeTimers();
+  try {
+    const controller = createTestController({
+      view: new MapView({controller: true}),
+      initialViewState: {longitude: 0, latitude: 0, zoom: 0}
+    });
+    const initialTimerCount = vi.getTimerCount();
+
+    controller.blockEvents(1000);
+    expect(vi.getTimerCount()).toBe(initialTimerCount + 1);
+    controller.finalize();
+
+    expect(controller._eventStartBlocked).toBeNull();
+    expect(vi.getTimerCount()).toBe(initialTimerCount);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test('MapController supports panning with multi-touch translation', () => {

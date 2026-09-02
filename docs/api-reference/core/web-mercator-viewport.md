@@ -127,7 +127,7 @@ Returns:
 
 #### `panByPosition3D` {#panbyposition3d}
 
-Returns a new longitude and latitude that keeps a 3D world coordinate at a given screen pixel. Unlike `panByPosition`, this method correctly handles the z-component (altitude) for cameras positioned above ground, making it suitable for use during rotation around 3D pivot points.
+Returns an approximate longitude and latitude correction for moving a 3D world coordinate toward a screen pixel. This compatibility helper accounts for the coordinate's altitude in one geographic-coordinate step, but may retain visible error when the viewport has a nonzero `position`. Use [`getTargetPanViewState`](#gettargetpanviewstate) when a complete, exact target-relative planar state is required.
 
 Parameters:
 
@@ -137,6 +137,63 @@ Parameters:
 Returns:
 
 * An object with `{longitude, latitude}` representing the new viewport center.
+
+#### `getTargetPanViewState` {#gettargetpanviewstate}
+
+Reconstructs a complete canonical map view state after translating the camera parallel to the world plane. The supplied target is placed at the requested view-local `screenPosition` by translating the frozen viewport center in common-space X/Y while preserving common-space center Z, zoom, bearing, and pitch. Camera-target radius is intentionally allowed to change; use [`getTargetViewState`](#gettargetviewstate) for radius-preserving orbit or zoom.
+
+Call this method on the operation-start viewport and rebuild the returned state with the same dimensions, lens, padding, clipping, model transform, and world-copy configuration. It returns `null` for unsupported projection modes, nonfinite or singular input, and parallel, backward, or near/far-clipped pixel-ray intersections. No partial state is returned.
+
+Parameters:
+
+* `options.target` (number[3]) - Numeric `[longitude, latitude, altitude]` target.
+* `options.screenPosition` (number[2]) - Desired view-local `[x, y]` pixel. It may be outside the viewport for an already active drag or transition.
+
+Returns:
+
+* A complete `{longitude, latitude, zoom, bearing, pitch, position}` map view state, or `null` when no supported finite representation exists.
+
+#### `getTargetInfo` {#gettargetinfo}
+
+Returns camera-relative information for a numeric `[longitude, latitude, altitude]` target. The result contains the target localized to the rendered world copy, its view-local projected position, physical camera distance, camera depth, near and far distances, and two distinct validity fields:
+
+* `isValid` is `true` when the target is finite, in front of the camera, and strictly inside the near/far clip volume.
+* `isVisible` is `true` when the target is valid and its projected x/y position is inside the viewport's pixel bounds.
+
+A target dragged outside the viewport can therefore remain valid even though it is no longer visible. Target acquisition normally requires `isVisible`; an already active target uses `isValid` so offscreen drag and inertia can continue. The method returns `null` when target navigation is unsupported or the input coordinate itself cannot be evaluated. An evaluated coordinate may return a result with both fields set to `false`.
+
+Parameters:
+
+* `target` (number[3]) - Numeric `[longitude, latitude, altitude]` target.
+
+Returns:
+
+* Camera-relative target metrics, or `null` when the projection mode or input coordinate cannot be evaluated.
+
+#### `getTargetViewState` {#gettargetviewstate}
+
+Reconstructs a canonical map view state around a numeric target at the requested view-local `screenPosition`. This pixel is independent of the target's position in the source viewport: it may move between calls and may be outside the viewport. The optional `bearing`, `pitch`, and `zoom` fields default to the source viewport. A zoom change scales the physical camera-to-target radius by `2 ** (sourceZoom - requestedZoom)`; changing only bearing or pitch therefore performs a rigid orbit.
+
+`minimumTargetDistance` optionally sets a non-negative physical camera-to-target floor in metres. `0` or omission disables it. Zoom-in is clamped analytically at that floor, and the returned `zoom` is the effective value after clamping. If the source camera is already closer than the requested minimum, its source distance is used as the floor so the operation does not jump outwards. Zoom-out is unaffected. A negative or nonfinite minimum returns `null`.
+
+Call this method on the operation-start viewport and reuse that viewport for all frames in one interaction. Reconstruct the returned state with the same lens, padding, clipping, model transform, and world-copy configuration before validating it. The method returns `null` when there is no finite supported representation, including a source target behind or outside the clip volume.
+
+The first experimental version supports standard perspective `WebMercatorViewport`. Orthographic mode and custom projection matrices are intentionally unsupported and return `null`. Picking is not performed by this viewport method, so asynchronous/WebGPU picking does not affect the calculation once the application already has a numeric target.
+
+Parameters:
+
+* `options.target` (number[3]) - Numeric `[longitude, latitude, altitude]` target.
+* `options.screenPosition` (number[2]) - Desired view-local `[x, y]` pixel. It may be outside the viewport for an already active target.
+* `options.bearing` (number, optional) - Requested bearing. Defaults to the source viewport.
+* `options.pitch` (number, optional) - Requested pitch. Defaults to the source viewport.
+* `options.zoom` (number, optional) - Requested zoom. Defaults to the source viewport.
+* `options.minimumTargetDistance` (number, optional) - Non-negative physical camera-to-target floor in metres. `0` disables the floor.
+
+Returns:
+
+* A complete `{longitude, latitude, zoom, bearing, pitch, position}` map view state using the effective (possibly clamped) zoom, or `null` when no supported finite representation exists.
+
+These target operations are the viewport primitives used by experimental [`MapController` target navigation](./map-controller.md#experimental-target-navigation). They do not acquire or retain interaction targets themselves.
 
 #### `fitBounds` {#fitbounds}
 

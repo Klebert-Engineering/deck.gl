@@ -173,6 +173,7 @@ export {
 
 export type {
   MapViewState,
+  MapViewProps,
   FirstPersonViewState,
   OrbitViewState,
   OrthographicViewState,
@@ -196,6 +197,21 @@ export type {
   GetPickingInfoParams,
   BinaryAttribute,
   Effect
+} from '@deck.gl/core';
+
+export type {
+  ControllerOptions,
+  MapControllerOptions,
+  MapInteractionTarget,
+  MapInteractionTargetOperation,
+  MapInteractionTargetSource,
+  MapInteractionTargetContext,
+  GetMapInteractionTarget,
+  MapInteractionTargetViewStateContext,
+  ConstrainMapInteractionTargetViewState,
+  WebMercatorTargetInfo,
+  WebMercatorTargetViewState,
+  WebMercatorTargetViewStateOptions
 } from '@deck.gl/core';
 
 export type {

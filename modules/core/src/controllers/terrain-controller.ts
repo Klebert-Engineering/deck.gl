@@ -3,9 +3,8 @@
 // Copyright (c) vis.gl contributors
 
 import MapController from './map-controller';
-import {MapState, MapStateProps} from './map-controller';
+import {MapState, MapStateProps, type MapControllerOptions} from './map-controller';
 import type {ControllerProps, InteractionState} from './controller';
-import type {MjolnirGestureEvent, MjolnirWheelEvent} from 'mjolnir.js';
 
 /**
  * Controller that extends MapController with terrain-aware behavior.
@@ -26,7 +25,7 @@ export default class TerrainController extends MapController {
       MapStateProps & {
         rotationPivot?: 'center' | '2d' | '3d';
         getAltitude?: (pos: [number, number]) => number | undefined;
-      }
+      } & MapControllerOptions
   ) {
     super.setProps({rotationPivot: '3d', ...props});
 
@@ -36,7 +35,11 @@ export default class TerrainController extends MapController {
     if (this._pickFrameId === null) {
       const loop = () => {
         const now = Date.now();
-        if (now - this._lastPickTime > 500 && !this.isDragging()) {
+        if (
+          now - this._lastPickTime > 500 &&
+          !this.isDragging() &&
+          !this.hasActiveInteractionTarget()
+        ) {
           this._lastPickTime = now;
           this._pickTerrainCenterAltitude();
           // On first successful pick, rebase viewport to terrain altitude.
@@ -82,7 +85,7 @@ export default class TerrainController extends MapController {
     interactionState: InteractionState = {}
   ): void {
     // Not initialized yet — pass through to MapController
-    if (this._terrainAltitude === undefined) {
+    if (this._terrainAltitude === undefined || this.hasActiveInteractionTarget()) {
       super.updateViewport(newControllerState, extraProps, interactionState);
       return;
     }

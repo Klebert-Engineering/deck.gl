@@ -51,6 +51,7 @@ new GlobeView({
 #### Controllers
 
 - All [controllers](./api-reference/core/controller.md) now support a `doubleClickDragZoom` gesture that enables continuous zooming by double-clicking and dragging vertically.
+- [`MapController`](./api-reference/core/map-controller.md#experimental-target-navigation) adds experimental, disabled-by-default target navigation for perspective `MapView`. It can keep a numeric 3D target anchored through planar pan, orbit/zoom, compound gestures, and controller-generated transitions. Applications may synchronously supply their own target and an optional physical minimum camera distance; unsupported projections and asynchronous built-in picking retain standard controller behavior.
 
 #### View Layout
 

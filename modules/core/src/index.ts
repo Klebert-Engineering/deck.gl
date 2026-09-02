@@ -142,9 +142,26 @@ export type {PointLightOptions} from './effects/lighting/point-light';
 export type {SunLightOptions} from './effects/lighting/sun-light';
 export type {
   ControllerProps,
+  ControllerOptions,
   ViewStateChangeParameters,
   InteractionState
 } from './controllers/controller';
+export type {
+  MapControllerOptions,
+  MapInteractionTarget,
+  MapInteractionTargetOperation,
+  MapInteractionTargetSource,
+  MapInteractionTargetContext,
+  GetMapInteractionTarget,
+  MapInteractionTargetViewStateContext,
+  ConstrainMapInteractionTargetViewState
+} from './controllers/map-controller';
+export type {
+  WebMercatorTargetInfo,
+  WebMercatorTargetPanViewStateOptions,
+  WebMercatorTargetViewState,
+  WebMercatorTargetViewStateOptions
+} from './viewports/web-mercator-viewport';
 
 // INTERNAL, DO NOT USE
 // @deprecated internal do not use
