@@ -144,6 +144,15 @@ Reconstructs a complete canonical map view state after translating the camera pa
 
 Call this method on the operation-start viewport and rebuild the returned state with the same dimensions, lens, padding, clipping, model transform, and world-copy configuration. It returns `null` for unsupported projection modes, nonfinite or singular input, and parallel, backward, or near/far-clipped pixel-ray intersections. No partial state is returned.
 
+Parameters:
+
+* `options.target` (number[3]) - Numeric `[longitude, latitude, altitude]` target.
+* `options.screenPosition` (number[2]) - Desired view-local `[x, y]` pixel. It may be outside the viewport for an already active drag or transition.
+
+Returns:
+
+* A complete `{longitude, latitude, zoom, bearing, pitch, position}` map view state, or `null` when no supported finite representation exists.
+
 #### `getTargetInfo` {#gettargetinfo}
 
 Returns camera-relative information for a numeric `[longitude, latitude, altitude]` target. The result contains the target localized to the rendered world copy, its view-local projected position, physical camera distance, camera depth, near and far distances, and two distinct validity fields:
@@ -152,6 +161,14 @@ Returns camera-relative information for a numeric `[longitude, latitude, altitud
 * `isVisible` is `true` when the target is valid and its projected x/y position is inside the viewport's pixel bounds.
 
 A target dragged outside the viewport can therefore remain valid even though it is no longer visible. Target acquisition normally requires `isVisible`; an already active target uses `isValid` so offscreen drag and inertia can continue. The method returns `null` when target navigation is unsupported or the input coordinate itself cannot be evaluated. An evaluated coordinate may return a result with both fields set to `false`.
+
+Parameters:
+
+* `target` (number[3]) - Numeric `[longitude, latitude, altitude]` target.
+
+Returns:
+
+* Camera-relative target metrics, or `null` when the projection mode or input coordinate cannot be evaluated.
 
 #### `getTargetViewState` {#gettargetviewstate}
 
@@ -162,6 +179,21 @@ Reconstructs a canonical map view state around a numeric target at the requested
 Call this method on the operation-start viewport and reuse that viewport for all frames in one interaction. Reconstruct the returned state with the same lens, padding, clipping, model transform, and world-copy configuration before validating it. The method returns `null` when there is no finite supported representation, including a source target behind or outside the clip volume.
 
 The first experimental version supports standard perspective `WebMercatorViewport`. Orthographic mode and custom projection matrices are intentionally unsupported and return `null`. Picking is not performed by this viewport method, so asynchronous/WebGPU picking does not affect the calculation once the application already has a numeric target.
+
+Parameters:
+
+* `options.target` (number[3]) - Numeric `[longitude, latitude, altitude]` target.
+* `options.screenPosition` (number[2]) - Desired view-local `[x, y]` pixel. It may be outside the viewport for an already active target.
+* `options.bearing` (number, optional) - Requested bearing. Defaults to the source viewport.
+* `options.pitch` (number, optional) - Requested pitch. Defaults to the source viewport.
+* `options.zoom` (number, optional) - Requested zoom. Defaults to the source viewport.
+* `options.minimumTargetDistance` (number, optional) - Non-negative physical camera-to-target floor in metres. `0` disables the floor.
+
+Returns:
+
+* A complete `{longitude, latitude, zoom, bearing, pitch, position}` map view state using the effective (possibly clamped) zoom, or `null` when no supported finite representation exists.
+
+These target operations are the viewport primitives used by experimental [`MapController` target navigation](./map-controller.md#experimental-target-navigation). They do not acquire or retain interaction targets themselves.
 
 #### `fitBounds` {#fitbounds}
 

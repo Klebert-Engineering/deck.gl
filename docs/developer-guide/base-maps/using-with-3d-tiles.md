@@ -92,6 +92,23 @@ The controller works by picking the terrain elevation at the center of the viewp
 
 Without `TerrainController`, the camera will orbit around the sea-level plane, which can cause it to clip through the terrain.
 
+## Target-Relative Navigation (Experimental)
+
+For applications that need one picked 3D point to remain under the pointer throughout pan, zoom, rotation, and controller-generated transitions, enable [`MapController` target navigation](../../api-reference/core/map-controller.md#experimental-target-navigation):
+
+```ts
+controller: {
+  type: TerrainController,
+  _targetNavigation: true
+}
+```
+
+`TerrainController` inherits this option from `MapController`. While a target is active, target-relative camera movement takes precedence over periodic terrain-center rebasing; terrain following resumes when the target lifecycle ends.
+
+With no application target provider, the controller acquires the topmost numeric coordinate through deck.gl's synchronous 3D picker, so at least one eligible layer must use `pickable: '3d'`. Pan translates parallel to the target's Web Mercator plane, while rotation and zoom preserve or scale physical camera-target distance. If no valid target is available, the operation follows standard controller behavior.
+
+Target navigation currently supports perspective `MapView` with the standard projection matrix. Orthographic mode, custom projection matrices, and `rubberBand` use standard navigation. The built-in controller pick is also unavailable with asynchronous picking, including WebGPU; applications that can resolve a fresh target synchronously may provide `getInteractionTarget` instead. See the API reference for the provider, minimum-distance, constraint, multiview, and lifecycle contracts.
+
 ## Integrating Layers with the Terrain
 
 A common use case is overlaying your own 2D data on top of the 3D surface. The [TerrainExtension](../../api-reference/extensions/terrain-extension.md) re-projects 2D layers onto the terrain on the GPU.
