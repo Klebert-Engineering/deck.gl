@@ -51,7 +51,7 @@ Supports all [MapController options](./map-controller.md#options) with the follo
 
 - `rotationPivot` - default `'3d'` (rotate around the picked object under the pointer)
 
-When experimental `_targetNavigation` is active, target anchoring takes precedence over terrain elevation rebasing. Periodic terrain-center picking and rebasing resume after the target lifecycle ends.
+When experimental [`_targetNavigation`](./map-controller.md#experimental-target-navigation) is active, target anchoring takes precedence over terrain elevation rebasing. Periodic terrain-center picking and rebasing resume after the target lifecycle ends.
 
 ## Source
 

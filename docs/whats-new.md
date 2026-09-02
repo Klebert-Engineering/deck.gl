@@ -68,6 +68,7 @@ New experimental multi-canvas foundations allow integrations to associate each `
 
 **New controller options**
 
+- [`MapController`](./api-reference/core/map-controller.md#experimental-target-navigation) adds experimental, disabled-by-default target navigation for perspective `MapView`. It can keep a numeric 3D target anchored through planar pan, orbit/zoom, compound gestures, and controller-generated transitions. Applications may synchronously supply their own target and an optional physical minimum camera distance; unsupported projections and asynchronous built-in picking retain standard controller behavior.
 - All [controllers](./api-reference/core/controller.md) now support `doubleClickDragZoom` for continuous zooming by double-clicking or double-tapping and dragging vertically.
 - The new `trackpadGesture` option enables native trackpad gestures, including two-finger pan, pinch-to-zoom, and rotate where supported.
 - The new `zoomAround` option chooses whether pointer-based zoom interactions keep the pointer location or the viewport center fixed.
