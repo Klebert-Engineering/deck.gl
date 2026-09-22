@@ -6,6 +6,8 @@ import View, {CommonViewState, CommonViewProps} from './view';
 import GlobeViewport from '../viewports/globe-viewport';
 import WebMercatorViewport from '../viewports/web-mercator-viewport';
 import GlobeController from '../controllers/globe-controller';
+import type {GlobeControllerOptions} from '../controllers/globe-controller';
+import type {ControllerOptions} from '../controllers/controller';
 import type {Parameters} from '@luma.gl/core';
 
 const GLOBE_VIEW_DEFAULT_PARAMETERS: Parameters = {
@@ -19,6 +21,16 @@ export type GlobeViewState = {
   latitude: number;
   /** Zoom level */
   zoom: number;
+  /** Camera bearing in degrees. */
+  bearing?: number;
+  /** Camera pitch in degrees. */
+  pitch?: number;
+  /** Viewport-center meter offset in the active projection's coordinate basis. */
+  position?: number[];
+  /** Minimum pitch in degrees. Default 0. */
+  minPitch?: number;
+  /** Maximum pitch in degrees. Default 60. */
+  maxPitch?: number;
   /** Min zoom, default `0` */
   minZoom?: number;
   /** Max zoom, default `20` */
@@ -29,7 +41,7 @@ export type GlobeViewState = {
   farZ?: number;
 } & CommonViewState;
 
-export type GlobeViewProps = {
+export type GlobeViewProps<OptionsT extends ControllerOptions = GlobeControllerOptions> = {
   /** The resolution at which to turn flat features into 3D meshes, in degrees. Smaller numbers will generate more detailed mesh. Default `10`. */
   resolution?: number;
   /** Scaler for the near plane, 1 unit equals to the height of the viewport. Default to `0.1`. Overwrites the `near` parameter. */
@@ -38,7 +50,7 @@ export type GlobeViewProps = {
   farZMultiplier?: number;
   /** Distance of the camera relative to viewport height. Default `1.5`. */
   altitude?: number;
-} & CommonViewProps<GlobeViewState>;
+} & CommonViewProps<GlobeViewState, OptionsT>;
 
 export default class GlobeView extends View<GlobeViewState, GlobeViewProps> {
   static displayName = 'GlobeView';

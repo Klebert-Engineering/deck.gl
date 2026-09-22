@@ -843,7 +843,7 @@ export default class Deck<ViewsT extends ViewOrViews = null> {
     x: number,
     y: number,
     viewId?: string
-  ): {coordinate?: number[]} | null {
+  ): {coordinate?: number[]; viewport?: Viewport} | null {
     const internalPickingMode = this._getInternalPickingMode();
     if (internalPickingMode !== 'sync') {
       return null;

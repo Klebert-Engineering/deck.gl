@@ -54,6 +54,12 @@ Supports all [Controller options](./controller.md#options) with the following de
 
 `_targetNavigation` keeps one numeric 3D coordinate at an acquired view-local pixel for the lifetime of a gesture, wheel burst, or controller-generated transition. The option is disabled by default and currently supports perspective [`MapView`](./map-view.md) with deck.gl's standard projection matrix.
 
+Acquisition and lifecycle are shared with other participating controllers; see the
+[base Controller contract](./controller.md#experimental-target-navigation). `MapControllerOptions`
+specializes `TargetNavigationOptions<WebMercatorViewport>`. The `MapInteractionTarget*` and
+`GetMapInteractionTarget` exports remain compatible aliases; new code may use
+`InteractionTarget` and `InteractionTargetContext<WebMercatorViewport>`.
+
 The camera invariant depends on the operation:
 
 | Operation | Target-relative behavior |
@@ -95,7 +101,7 @@ If the camera starts closer than a positive `minimumTargetDistance`, the acquisi
 
 Without a provider, deck.gl attempts a synchronous controller 3D pick. This requires a layer with `pickable: '3d'`. The built-in pick is unavailable when picking is asynchronous, including WebGPU, but a synchronous application provider can still enable target navigation in that mode.
 
-Orthographic `MapView`, custom projection matrices, and controllers configured with `rubberBand` take the complete standard-controller path without invoking either target callback.
+Orthographic `MapView`, custom projection matrices, legacy metre sizing, and controllers configured with `rubberBand` take the complete standard-controller path without invoking either target callback. Overlapping independent pinch/multipan recognizers use the rebased stock handoff described in the base Controller contract.
 
 #### Target constraints and lifecycle
 
@@ -103,7 +109,7 @@ Orthographic `MapView`, custom projection matrices, and controllers configured w
 
 The callback must return a complete canonical map view state or `null`. Deck then applies ordinary `MapState` constraints and validates finiteness, clipping, target pixel, the operation-specific invariant, and the session minimum distance. A rejected result keeps the last valid state.
 
-Both application callbacks are synchronous and are frozen for an active session. Replacing them affects the next session. They must not call `Controller.setProps` synchronously; doing so throws to prevent partial controller reconfiguration. Other callback exceptions clear target ownership and propagate from `handleEvent` or `updateTransition`.
+Both application callbacks are synchronous. The acquired numeric target and constraint callback are frozen for an active session; replacements affect the next session. The constraint callback must not call `Controller.setProps` synchronously; doing so throws to prevent partial controller reconfiguration. Reconfiguration during provider resolution discards that acquisition. Other callback exceptions clear target ownership and propagate from `handleEvent` or `updateTransition`.
 
 While the target is owned, [`InteractionState`](./deck.md#oninteractionstatechange) exposes its numeric coordinate as `interactionTargetPosition` together with the owning `viewId`. Target-relative rotation also exposes the same coordinate as `rotationPivotPosition` for compatibility. These fields clear on completion, cancellation, interruption, controller replacement, finalization, or callback failure.
 

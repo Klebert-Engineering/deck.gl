@@ -728,8 +728,8 @@ webglTest('Deck#multi-canvas picking routes by canvas', async () => {
       right: {longitude: 10, latitude: 10, zoom: 10}
     },
     views: [
-      new MapView({id: 'left', canvasId: 'deck-test-pick-canvas-a'}),
-      new MapView({id: 'right', canvasId: 'deck-test-pick-canvas-b'})
+      new MapView({id: 'left', canvasId: 'deck-test-pick-canvas-a', controller: true}),
+      new MapView({id: 'right', canvasId: 'deck-test-pick-canvas-b', controller: true})
     ],
     layers: []
   });
@@ -744,7 +744,9 @@ webglTest('Deck#multi-canvas picking routes by canvas', async () => {
   deck.deckPicker.pickObject = opts => {
     syncCalls.push(opts);
     return createPointPickResult({
-      layer: {id: opts.canvasId === 'deck-test-pick-canvas-b' ? 'right-layer' : 'left-layer'}
+      layer: {id: opts.canvasId === 'deck-test-pick-canvas-b' ? 'right-layer' : 'left-layer'},
+      coordinate: [10, 10, 250],
+      viewport: opts.viewports[0]
     });
   };
   // @ts-expect-error test override
@@ -788,6 +790,21 @@ webglTest('Deck#multi-canvas picking routes by canvas', async () => {
   ).toBe('right-layer');
   expect(rectCalls[0].canvasId).toBe('deck-test-pick-canvas-b');
   expect(rectCalls[0].viewports.map(viewport => viewport.id)).toEqual(['right']);
+
+  // Controller picking must preserve both canvas routing and target-validation metadata.
+  for (const viewId of ['left', 'right']) {
+    // @ts-expect-error testing private controller picking integration
+    const picked = deck.viewManager.controllers[viewId].pickPosition(16, 24);
+    const viewport = deck.getViewports().find(candidate => candidate.id === viewId);
+    expect(picked.coordinate).toEqual([10, 10, 250]);
+    expect(picked.viewport).toBe(viewport);
+    expect(syncCalls.at(-1)).toMatchObject({
+      x: 16,
+      y: 24,
+      unproject3D: true,
+      canvasId: viewId === 'left' ? 'deck-test-pick-canvas-a' : 'deck-test-pick-canvas-b'
+    });
+  }
 
   finalizeOwnedDeck(deck);
   canvasA.remove();

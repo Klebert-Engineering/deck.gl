@@ -3,6 +3,12 @@
 // Copyright (c) vis.gl contributors
 
 import type Viewport from '../viewports/viewport';
+import type {
+  InteractionTarget,
+  InteractionTargetOperation,
+  InteractionTargetSession
+} from './interaction-target';
+import type TargetNavigationInterpolator from '../transitions/target-navigation-interpolator';
 
 /** Determines how a controller state resolves constraint violations. */
 export type ConstraintMode = 'hard' | 'elastic' | 'rebound' | 'preserve';
@@ -106,6 +112,26 @@ export default abstract class ViewState<
 }
 
 export interface IViewState<T> {
+  /** Optional target-navigation support. A null viewport selects the stock input path. */
+  getTargetNavigationViewport?(operation?: InteractionTargetOperation): Viewport | null;
+  /** Validate and localize a numeric target in this camera's geometry. */
+  validateInteractionTarget?(target: InteractionTarget): InteractionTarget | null;
+  /** Attach or release immutable target geometry without taking ownership of its lifetime. */
+  withInteractionTarget?(target: InteractionTarget, session: InteractionTargetSession): T;
+  withoutInteractionTarget?(): T;
+  /** Construct one combined target-relative input candidate. */
+  zoomRotate?(
+    params: {scale: number; deltaAngleX?: number; deltaAngleY?: number},
+    constraintContext?: ConstraintContext
+  ): T;
+  /** Optional atomic keyboard zoom; the concrete camera defines how repeated speed composes. */
+  zoomByKeyboard?(params: {direction: 'in' | 'out'; speed?: number; repeat: number}): T;
+  /** Supply model-specific frame reconstruction to the canonical transition scheduler. */
+  createTargetNavigationInterpolator?(
+    endState: T,
+    getCurrentState: () => T
+  ): TargetNavigationInterpolator | null;
+
   makeViewport?: (props: Record<string, any>) => Viewport;
 
   getViewportProps(): Record<string, any>;

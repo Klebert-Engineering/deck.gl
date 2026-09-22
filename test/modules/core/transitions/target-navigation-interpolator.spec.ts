@@ -28,8 +28,10 @@ const END_PROPS = {
   position: [4, 8, 12]
 };
 
+const TRANSITION_PROPS = Object.keys(START_PROPS);
+
 describe('TargetNavigationInterpolator', () => {
-  it('carries a frozen numeric target and uses the deterministic radius curve', () => {
+  it('carries a frozen numeric target and delegates the camera curve to the resolver', () => {
     const coordinate: [number, number, number] = [11.25, 47.75, 125];
     const screenPosition: [number, number] = [320, 240];
     const sourceTarget = {coordinate, screenPosition, featureId: 'application-only'};
@@ -39,13 +41,13 @@ describe('TargetNavigationInterpolator', () => {
         contexts.push(context);
         return {
           ...props,
-          acceptedRadius: context.mode === 'orbit' ? context.radius : null
+          acceptedRadius: 100 * 2 ** (START_PROPS.zoom - props.zoom)
         };
       }
     );
     const interpolator = new TargetNavigationInterpolator({
       target: sourceTarget,
-      startRadius: 100,
+      transitionProps: TRANSITION_PROPS,
       endScreenPosition: [420, 340],
       resolveFrame
     });
@@ -94,18 +96,18 @@ describe('TargetNavigationInterpolator', () => {
     expect(Object.isFrozen(contexts[0].previousProps)).toBe(true);
     expect(Object.isFrozen(contexts[0].previousProps.position)).toBe(true);
     expect('featureId' in contexts[1].target).toBe(false);
-    expect(contexts.every(context => context.mode === 'orbit')).toBe(true);
+    expect(contexts.every(context => !('radius' in context))).toBe(true);
   });
 
   it('interpolates planar target pixels without manufacturing a radius', () => {
     const contexts: TargetNavigationTransitionContext[] = [];
     const interpolator = new TargetNavigationInterpolator({
-      mode: 'pan',
+      transitionProps: TRANSITION_PROPS,
       target: {coordinate: [11.25, 47.75, 125], screenPosition: [320, 240]},
       endScreenPosition: [440, 300],
       resolveFrame: (props, context) => {
         contexts.push(context);
-        return {...props, acceptedMode: context.mode};
+        return {...props, acceptedMode: 'pan'};
       }
     });
     const {start, end} = interpolator.initializeProps(START_PROPS, END_PROPS);
@@ -119,11 +121,11 @@ describe('TargetNavigationInterpolator', () => {
       [350, 255],
       [380, 270]
     ]);
-    expect(contexts.every(context => context.mode === 'pan')).toBe(true);
+    expect(contexts.every(context => !('mode' in context))).toBe(true);
     expect(contexts.every(context => !('radius' in context))).toBe(true);
   });
 
-  it('clamps orbit radii to the frozen session floor without moving an inside start outwards', () => {
+  it('passes the frozen distance policy to the model without requiring map fields', () => {
     const outsideContexts: TargetNavigationTransitionContext[] = [];
     const outside = new TargetNavigationInterpolator({
       target: {
@@ -131,18 +133,19 @@ describe('TargetNavigationInterpolator', () => {
         screenPosition: [320, 240],
         minimumTargetDistance: 60
       },
-      startRadius: 100,
+      transitionProps: ['position'],
       resolveFrame: (props, context) => {
         outsideContexts.push(context);
         return {...props};
       }
     });
-    const outsideProps = outside.initializeProps(START_PROPS, {...END_PROPS, zoom: 14});
+    const outsideProps = outside.initializeProps({position: [0, 0, 0]}, {position: [4, 8, 12]});
     outside.interpolateProps(outsideProps.start, outsideProps.end, 0.25);
     outside.interpolateProps(outsideProps.start, outsideProps.end, 0.75);
-    expect(
-      outsideContexts.map(context => (context.mode === 'orbit' ? context.radius : null))
-    ).toEqual([60, 60]);
+    expect(outsideContexts.every(context => !('radius' in context))).toBe(true);
+    expect(outside.interpolateProps(outsideProps.start, outsideProps.end, 0.5)).toEqual({
+      position: [2, 4, 6]
+    });
     expect(outsideContexts[0].target.minimumTargetDistance).toBe(60);
 
     const insideContexts: TargetNavigationTransitionContext[] = [];
@@ -152,7 +155,7 @@ describe('TargetNavigationInterpolator', () => {
         screenPosition: [320, 240],
         minimumTargetDistance: 120
       },
-      startRadius: 80,
+      transitionProps: TRANSITION_PROPS,
       resolveFrame: (props, context) => {
         insideContexts.push(context);
         return {...props};
@@ -160,7 +163,7 @@ describe('TargetNavigationInterpolator', () => {
     });
     const insideProps = inside.initializeProps(START_PROPS, {...END_PROPS, zoom: 14});
     inside.interpolateProps(insideProps.start, insideProps.end, 0.5);
-    expect(insideContexts[0].mode === 'orbit' && insideContexts[0].radius).toBe(80);
+    expect(insideContexts[0].target.minimumTargetDistance).toBe(120);
   });
 
   it.each([-1, Number.NaN, Infinity, null as unknown as number, '20' as unknown as number])(
@@ -174,7 +177,7 @@ describe('TargetNavigationInterpolator', () => {
               screenPosition: [320, 240],
               minimumTargetDistance
             },
-            startRadius: 100,
+            transitionProps: TRANSITION_PROPS,
             resolveFrame: props => ({...props})
           })
       ).toThrow('minimum target distance must be non-negative and finite');
@@ -192,7 +195,7 @@ describe('TargetNavigationInterpolator', () => {
     };
     const interpolator = new TargetNavigationInterpolator({
       target: {coordinate: [11.25, 47.75, 125], screenPosition: [320, 240]},
-      startRadius: 100,
+      transitionProps: TRANSITION_PROPS,
       resolveFrame
     });
     const {start, end} = interpolator.initializeProps(START_PROPS, END_PROPS);
@@ -212,7 +215,7 @@ describe('TargetNavigationInterpolator', () => {
     const resolveFrame = vi.fn(() => null);
     const interpolator = new TargetNavigationInterpolator({
       target: {coordinate: [11.25, 47.75, 125], screenPosition: [320, 240]},
-      startRadius: 100,
+      transitionProps: TRANSITION_PROPS,
       resolveFrame
     });
     const {start, end} = interpolator.initializeProps(START_PROPS, END_PROPS);

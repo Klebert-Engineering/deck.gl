@@ -294,6 +294,44 @@ afterEach(() => {
 });
 
 describe('MapController target navigation', () => {
+  it.each(['provider', 'picker'])(
+    'honors padding-aware zoomAround center for %s acquisition',
+    acquisition => {
+      const position: [number, number] = [440, 340];
+      let target!: MapInteractionTarget;
+      let viewport!: WebMercatorViewport;
+      const provider = vi.fn(() => target);
+      const picker = vi.fn(() => ({coordinate: target.coordinate, viewport}));
+      const harness = createControllerHarness({
+        viewOptions: {padding: {left: 100, right: 20, top: 80}},
+        controllerOptions: {
+          _targetNavigation: true,
+          zoomAround: 'center',
+          getInteractionTarget: acquisition === 'provider' ? provider : undefined
+        },
+        pickPosition: picker
+      });
+      target = harness.makeTarget(position);
+      viewport = harness.getViewport();
+      harness.controller.handleEvent(makeWheelEvent(20) as any);
+      if (acquisition === 'provider') {
+        expect(provider).toHaveBeenCalledWith(
+          expect.objectContaining({
+            screenPosition: position.map(component => expect.closeTo(component, 7)),
+            operation: 'zoom'
+          })
+        );
+        expect(picker).not.toHaveBeenCalled();
+      } else {
+        expect(picker).toHaveBeenCalledWith(
+          expect.closeTo(VIEW_ORIGIN.x + position[0], 7),
+          expect.closeTo(VIEW_ORIGIN.y + position[1], 7)
+        );
+      }
+      expectTargetInvariant(harness, target, position);
+      harness.controller.finalize();
+    }
+  );
   it('is behavior-compatible with stock MapController when disabled', () => {
     const provider = vi.fn(() => null);
     const pickPosition = vi.fn(() => ({coordinate: [8.5, 47.3, 0]}));

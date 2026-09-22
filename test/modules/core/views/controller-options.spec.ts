@@ -3,7 +3,13 @@
 // Copyright (c) vis.gl contributors
 
 import {test, expect} from 'vitest';
-import {MapController, MapView} from '@deck.gl/core';
+import {
+  MapController,
+  MapView,
+  _GlobeView as GlobeView,
+  _GlobeViewport as GlobeViewport,
+  WebMercatorViewport
+} from '@deck.gl/core';
 import type {
   ControllerOptions,
   ConstrainMapInteractionTargetViewState,
@@ -21,6 +27,19 @@ import type {
   WebMercatorTargetViewState,
   WebMercatorTargetViewStateOptions
 } from '@deck.gl/core';
+import type {
+  InteractionTarget,
+  InteractionTargetContext,
+  GetInteractionTarget,
+  TargetNavigationOptions,
+  GlobeControllerOptions,
+  GlobeViewProps
+} from '@deck.gl/core';
+import type {
+  InteractionTarget as MainInteractionTarget,
+  GlobeControllerOptions as MainGlobeControllerOptions,
+  TargetNavigationOptions as MainTargetNavigationOptions
+} from 'deck.gl';
 import type {
   ControllerOptions as MainControllerOptions,
   ConstrainMapInteractionTargetViewState as MainConstrainMapInteractionTargetViewState,
@@ -68,13 +87,17 @@ const typedCustomMapViewProps: MapViewProps<CustomMapControllerOptions> = {
 };
 const looseCustomMapViewProps: MapViewProps = typedCustomMapViewProps;
 
-const invalidMapViewProps: MapViewProps = {
-  // @ts-expect-error Custom controller options require an explicit custom controller type
-  controller: {dragPan: true, customMode: 'precise'}
+// The custom-controller escape hatch is intentionally permissive. Check excess fields against
+// named options, rather than relying on excess-property checking of a union with an index signature.
+const invalidMapControllerOptions: MapControllerOptions = {
+  dragPan: true,
+  // @ts-expect-error Custom options do not belong to the named built-in controller contract.
+  customMode: 'precise'
 };
+const invalidMapViewProps: MapViewProps = {controller: invalidMapControllerOptions};
 const invalidDeckProps: DeckProps = {
-  // @ts-expect-error Deck's MapView shorthand rejects unrelated controller options
-  controller: {dragPan: true, customMode: 'precise'}
+  // @ts-expect-error Known options retain their types even with the custom-controller escape hatch.
+  controller: {dragPan: 'enabled'}
 };
 
 // Verify that all experimental contracts are available without deep imports from both packages.
@@ -104,6 +127,37 @@ type PublicTargetContracts =
   | MainWebMercatorTargetViewStateOptions;
 const publicTargetContract: PublicTargetContracts | null = null;
 const trackpadSource: MapInteractionTargetSource = 'trackpad';
+
+const genericProvider: GetInteractionTarget = context => {
+  const pixel: number[] | null = context.screenPosition;
+  return pixel ? {coordinate: [0, 0, 0], screenPosition: [pixel[0], pixel[1]]} : null;
+};
+const genericOptions: TargetNavigationOptions = {
+  _targetNavigation: true,
+  getInteractionTarget: genericProvider
+};
+const globeOptions: GlobeControllerOptions = {
+  ...genericOptions,
+  getInteractionTarget: context => {
+    const viewport: GlobeViewport | WebMercatorViewport = context.viewport;
+    return viewport.getTargetInfo([0, 0, 0])?.isVisible
+      ? {coordinate: [0, 0, 0], screenPosition: [0, 0]}
+      : null;
+  }
+};
+const globeViewProps: GlobeViewProps = {controller: globeOptions};
+const mainGlobeOptions: MainGlobeControllerOptions = globeOptions;
+const mainGenericOptions: MainTargetNavigationOptions = genericOptions;
+const compatibilityTarget: InteractionTarget | MainInteractionTarget | MapInteractionTarget | null =
+  null;
+const compatibilityContext:
+  | InteractionTargetContext<WebMercatorViewport>
+  | MapInteractionTargetContext
+  | null = null;
+const incompatibleProvider: TargetNavigationOptions = {
+  // @ts-expect-error A Web Mercator-only callback cannot accept arbitrary viewports.
+  getInteractionTarget
+};
 
 test('MapView types map controller options and preserve a custom controller escape hatch', () => {
   const mapView = new MapView(mapViewProps);
@@ -135,5 +189,10 @@ test('MapView types map controller options and preserve a custom controller esca
   expect(publicTargetContract).toBeNull();
   expect(trackpadSource).toBe('trackpad');
   expect(invalidMapViewProps.controller).toEqual({dragPan: true, customMode: 'precise'});
-  expect(invalidDeckProps.controller).toEqual({dragPan: true, customMode: 'precise'});
+  expect(invalidDeckProps.controller).toEqual({dragPan: 'enabled'});
+  expect(new GlobeView(globeViewProps).controller).toMatchObject(mainGlobeOptions);
+  expect(mainGenericOptions).toBe(genericOptions);
+  expect(compatibilityTarget).toBeNull();
+  expect(compatibilityContext).toBeNull();
+  expect(incompatibleProvider.getInteractionTarget).toBe(getInteractionTarget);
 });

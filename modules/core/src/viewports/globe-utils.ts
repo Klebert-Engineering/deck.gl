@@ -4,10 +4,19 @@
 
 import {clamp, vec3, Quaternion} from '@math.gl/core';
 import TransitionInterpolator from '../transitions/transition-interpolator';
-import {zoomAdjust} from './globe-viewport';
+import {MAX_LATITUDE} from '@math.gl/web-mercator';
 
 const DEGREES_TO_RADIANS = Math.PI / 180;
 const RADIANS_TO_DEGREES = 180 / Math.PI;
+
+/** Latitude compensation shared by spherical viewports and camera-frame transitions. */
+export function zoomAdjust(latitude: number, clampToPoles?: boolean): number {
+  if (clampToPoles) {
+    latitude = Math.max(Math.min(latitude, MAX_LATITUDE), -MAX_LATITUDE);
+  }
+  const scaleAdjust = Math.PI * Math.cos((latitude * Math.PI) / 180);
+  return Math.log2(scaleAdjust);
+}
 
 type Vec3 = number[];
 

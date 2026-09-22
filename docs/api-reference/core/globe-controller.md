@@ -46,6 +46,65 @@ Supports all [Controller options](./controller.md#options) with the following de
 - `maxBounds` - constrains the viewport to the specified bounding box `[[minLng, minLat], [maxLng, maxLat]]`
 - `maxBoundsPadding` - padding inside the viewport when fitting `maxBounds`, using the same `{left, right, top, bottom}` format as view padding. Numeric values are pixels; strings may be percentages or layout expressions such as `calc(10% - 4px)`. Each side is measured from the projected globe center. Default `0`.
 
+## Experimental target navigation
+
+Enable `_targetNavigation` in `GlobeView.controller` to navigate around numeric elevated targets.
+`GlobeControllerOptions` and the shared target types are exported from the package root.
+
+```ts
+import {_GlobeView as GlobeView, type InteractionTarget} from '@deck.gl/core';
+
+const coordinate: InteractionTarget['coordinate'] = [30, 20, 100000];
+const view = new GlobeView({
+  controller: {
+    _targetNavigation: true,
+    getInteractionTarget: ({viewport}) => {
+      const information = viewport.getTargetInfo(coordinate);
+      return information?.isVisible ? {
+        coordinate,
+        screenPosition: information.projectedPosition.slice(0, 2) as [number, number]
+      } : null;
+    }
+  }
+});
+```
+
+The [shared Controller contract](./controller.md#experimental-target-navigation) defines provider
+precedence, synchronous picking, coordinate/pixel units, public state, and cancellation. The
+provider's viewport type is `GlobeViewport | WebMercatorViewport`, reflecting GlobeView's actual
+projection switch. There is no Globe equivalent of Map's application constraint callback yet.
+
+| Operation on the sphere | Invariant |
+| --- | --- |
+| Pan | Rigidly rotates the spherical camera frame to move the elevated target to the requested pixel; effective magnification and camera distance from the globe origin are preserved. |
+| Rotate | Preserves the target pixel and metric camera-target distance. |
+| Zoom | Preserves the pixel and changes camera-target distance at the requested scale, respecting an optional metre floor. |
+| Pinch | One frozen target and one combined zoom/rotation solve. |
+
+Each animation frame uses the same geometric validation. Active target pan inertia extrapolates
+the target pixel through the spherical pan solver; stock navigation retains its native globe-frame
+inertia and limb damping. Invalid/clipped/occluded candidates retain the last valid state, without
+damping an exact target invariant. This is not terrain or building collision detection.
+
+The initial supported domain is a standard perspective globe, a target on/above the spherical
+surface, and a representable bearing/pitch camera with an optional global Cartesian metre offset
+in `position`. Globe's position basis differs from Web Mercator's local east/north/up basis.
+Custom projection/model matrices, orthographic projection, rubber banding, and below-surface or
+sphere-occluded targets are unsupported. Elevated targets beyond the surface horizon remain
+usable if their camera-to-target segment clears the sphere. Ordinary stock controls remain available.
+
+Above zoom 12, GlobeView uses Web Mercator. Crossing that boundary ends the old target session,
+converts the existing offset basis, and hands navigation to the stock controller with rebased
+gesture state. The next session resolves against the new viewport. This avoids trapping wheel
+or pinch input at the boundary; it does **not** promise exact target preservation or a seamless
+cross-projection animation. At high zoom, a new target session uses the Mercator solver.
+
+FirstPerson dolly, picked Orbit pivots, orthographic target navigation, and async target acquisition
+remain follow-up work; they are not enabled by this option.
+
+The [pure JavaScript Globe example](https://github.com/visgl/deck.gl/tree/master/examples/get-started/pure-js/globe)
+includes an elevated-target demo enabled by the `?target-navigation` query parameter.
+
 ## Custom GlobeController
 
 You can further customize the `GlobeController`'s behavior by extending the class:

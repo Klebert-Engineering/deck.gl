@@ -9,6 +9,18 @@ import {IViewState, type ConstraintContext} from './view-state';
 import type {MaxBoundsPadding} from './utils';
 import {ConstructorOf} from '../types/types';
 import {deepEqual} from '../utils/deep-equal';
+import {worldToPixels} from '@math.gl/web-mercator';
+import TargetNavigationInterpolator from '../transitions/target-navigation-interpolator';
+import {
+  copyInteractionTarget,
+  getInteractionTargetStructure,
+  type InteractionTarget,
+  type InteractionTargetOperation,
+  type InteractionTargetSource,
+  type InteractionTargetSession,
+  type TargetNavigationOptions,
+  type GetInteractionTarget
+} from './interaction-target';
 
 import type Viewport from '../viewports/viewport';
 
@@ -20,12 +32,12 @@ import type {
   MjolnirKeyEvent
 } from 'mjolnir.js';
 import type {Timeline} from '@luma.gl/engine';
-import {worldToPixels} from '@math.gl/web-mercator';
 
 const NO_TRANSITION_PROPS = {
   transitionDuration: 0
 } as const;
 
+const TARGET_WHEEL_RELEASE_MS = 150;
 const DEFAULT_INERTIA = 300;
 const REBOUND_DURATION = 300;
 const INERTIA_EASING = (t: number): number => 1 - (1 - t) * (1 - t);
@@ -141,7 +153,7 @@ export type InteractionState = {
   isZooming?: boolean;
   /** World coordinate [lng, lat, altitude] of rotation pivot point when rotating */
   rotationPivotPosition?: [number, number, number];
-  /** Numeric world coordinate [lng, lat, altitude] anchoring the active interaction */
+  /** Numeric coordinate in the owning viewport's world space anchoring the active interaction */
   interactionTargetPosition?: [number, number, number];
 };
 
@@ -160,6 +172,19 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
   abstract get ControllerState(): ConstructorOf<ControllerState>;
   abstract get transition(): TransitionProps;
 
+  protected targetNavigation: boolean = false;
+  protected getInteractionTarget?: GetInteractionTarget;
+
+  private _activeTarget: InteractionTarget | null = null;
+  private _activeTargetOwners = new Set<'pan' | 'zoom' | 'rotate' | 'transition' | 'wheel'>();
+  private _wheelTargetTimer: ReturnType<typeof setTimeout> | null = null;
+  private _targetSessionGeneration = 0;
+  private _configurationRevision = 0;
+  private _targetConstraintDepth = 0;
+  private _activeTargetViewStructure: Record<string, unknown> | null = null;
+
+  private _activeTargetViewportType: unknown = null;
+
   // @ts-expect-error (2564) - not assigned in the constructor
   protected props: ControllerProps;
   protected state: Record<string, any> = {};
@@ -169,7 +194,10 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
   protected onViewStateChange: (params: ViewStateChangeParameters) => void;
   protected onStateChange: (state: InteractionState) => void;
   protected makeViewport: (opts: Record<string, any>) => Viewport;
-  protected pickPosition?: (x: number, y: number) => {coordinate?: number[]} | null;
+  protected pickPosition?: (
+    x: number,
+    y: number
+  ) => {coordinate?: number[]; viewport?: Viewport} | null;
 
   protected _controllerState?: ControllerState;
   private _events: Record<string, boolean> = {};
@@ -181,6 +209,10 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
   private _panMove: boolean = false;
   private _multiPanMode: 'pan' | 'rotate' | null = null;
   private _multiPanStartCenter: {x: number; y: number} | null = null;
+  private _lastMultiPanEvent: MjolnirGestureEvent | null = null;
+  private _multiPanDeltaOrigin: [number, number] = [0, 0];
+  private _pinchScaleOrigin = 1;
+  private _targetOverlap = false;
   private _doubleClickDragAnchor: [number, number] | null = null;
   /** Input samples shared by pinch handlers and specialized map-controller implementations. */
   protected _startPinchRotation: number | null = null;
@@ -215,7 +247,7 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     makeViewport: (opts: Record<string, any>) => Viewport;
     onViewStateChange: (params: ViewStateChangeParameters) => void;
     onStateChange: (state: InteractionState) => void;
-    pickPosition?: (x: number, y: number) => {coordinate?: number[]} | null;
+    pickPosition?: (x: number, y: number) => {coordinate?: number[]; viewport?: Viewport} | null;
   }) {
     this.transitionManager = new TransitionManager<ControllerState>({
       ...opts,
@@ -249,6 +281,7 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
   }
 
   finalize() {
+    this._releaseAllTargets(true);
     if (this._eventStartBlocked !== null) {
       clearTimeout(this._eventStartBlocked);
       this._eventStartBlocked = null;
@@ -266,7 +299,16 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
   /**
    * Callback for events
    */
-  handleEvent(event: MjolnirEvent) {
+  handleEvent(event: MjolnirEvent): boolean {
+    try {
+      return this._handleEvent(event);
+    } catch (error) {
+      this._releaseAllTargets(true);
+      throw error;
+    }
+  }
+
+  private _handleEvent(event: MjolnirEvent): boolean {
     // Force recalculate controller state
     this._controllerState = undefined;
     const eventStartBlocked = this._eventStartBlocked;
@@ -382,6 +424,26 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
    * Extract interactivity options
    */
   setProps(props: ControllerProps) {
+    if (this._targetConstraintDepth > 0) {
+      throw new Error(
+        this.constructor.name +
+          '.setProps cannot be called synchronously from constrainInteractionTargetViewState'
+      );
+    }
+    this._configurationRevision++;
+    const targetOptions = props as ControllerProps & TargetNavigationOptions;
+    this.targetNavigation = targetOptions._targetNavigation ?? false;
+    this.getInteractionTarget = targetOptions.getInteractionTarget;
+    this.zoomAround = props.zoomAround ?? 'pointer';
+    if (
+      this._activeTarget &&
+      (!this.targetNavigation ||
+        !this._areTargetViewportDimensionsEqual(props) ||
+        !deepEqual(this._activeTargetViewStructure, getInteractionTargetStructure(props), -1) ||
+        this.makeViewport(props).constructor !== this._activeTargetViewportType)
+    ) {
+      this._releaseAllTargets(true);
+    }
     if (props.maxBoundsPadding === undefined) {
       props.maxBoundsPadding = null;
     }
@@ -419,7 +481,6 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
       touchRotate = false,
       multiTouchDrag = touchRotate ? 'rotate' : null,
       trackpadGesture = false,
-      zoomAround = 'pointer',
       keyboard = true
     } = props;
 
@@ -447,7 +508,6 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     this.touchRotate = multiTouchDrag === 'rotate';
     this.multiTouchDrag = multiTouchDrag;
     this.trackpadGesture = trackpadGesture;
-    this.zoomAround = zoomAround;
     this.keyboard = keyboard;
 
     // Normalize view state if maxBounds is defined
@@ -472,7 +532,12 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
   }
 
   updateTransition() {
-    this.transitionManager.updateTransition();
+    try {
+      this.transitionManager.updateTransition();
+    } catch (error) {
+      this._releaseAllTargets(true);
+      throw error;
+    }
   }
 
   toggleEvents(eventNames, enabled) {
@@ -501,6 +566,32 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     extraProps: Record<string, any> | null = null,
     interactionState: InteractionState = {}
   ) {
+    const state = newControllerState.getState();
+    const sessionId = state.targetNavigationSessionId;
+    if (
+      sessionId !== undefined &&
+      sessionId !== null &&
+      (sessionId !== this._targetSessionGeneration || !this._activeTarget)
+    )
+      return;
+    if (this._activeTarget && !state.interactionTarget) this._releaseAllTargets(true);
+    extraProps = this._getTargetTransitionProps(newControllerState, extraProps);
+    if (state.interactionTarget) {
+      const isTargetRotation =
+        (this._activeTargetOwners.has('rotate') && interactionState.isDragging !== false) ||
+        (state.targetNavigationOperation === 'rotate' && interactionState.isRotating === true);
+      interactionState = {
+        ...interactionState,
+        interactionTargetPosition: [...state.interactionTarget.coordinate] as [
+          number,
+          number,
+          number
+        ],
+        rotationPivotPosition: isTargetRotation
+          ? ([...state.interactionTarget.coordinate] as [number, number, number])
+          : undefined
+      };
+    }
     const viewState = {...newControllerState.getViewportProps(), ...extraProps};
 
     // TODO - to restore diffing, we need to include interactionState
@@ -594,6 +685,22 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     }
 
     const action = alternateMode ? 'pan' : 'rotate';
+    const acquisitionPosition = this._getGestureAcquisitionPosition(event);
+    if (
+      this._isTargetPositionInBounds(acquisitionPosition) &&
+      (event.pointerType !== 'trackpad' || this.trackpadGesture) &&
+      (action === 'pan' ? this.dragPan : this.dragRotate)
+    ) {
+      this._acquireTarget(
+        action,
+        event.pointerType === 'trackpad'
+          ? 'trackpad'
+          : event.pointerType === 'touch'
+            ? 'touch'
+            : 'pointer',
+        acquisitionPosition
+      );
+    }
     const constraintContext = this._getConstraintContext(action, 'start');
     const newControllerState = alternateMode
       ? this.controllerState.panStart({pos}, constraintContext)
@@ -615,7 +722,9 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     if (!this.isDragging()) {
       return false;
     }
-    return this._panMove ? this._onPanMoveEnd(event) : this._onPanRotateEnd(event);
+    const handled = this._panMove ? this._onPanMoveEnd(event) : this._onPanRotateEnd(event);
+    if (handled) this._endTargetGesture(this._panMove ? 'pan' : 'rotate');
+    return handled;
   }
 
   // Default handler for panning to move.
@@ -738,6 +847,9 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     }
     event.srcEvent.preventDefault();
 
+    const zoomPosition = this.getZoomPosition(pos);
+    this._acquireWheelTarget(zoomPosition);
+
     const {speed = 0.01, smooth = false} = this.scrollZoom === true ? {} : this.scrollZoom;
     const {delta} = event;
 
@@ -747,7 +859,6 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
       scale = 1 / scale;
     }
 
-    const zoomPosition = this.getZoomPosition(pos);
     const transitionProps = smooth
       ? {...this._getTransitionProps({around: zoomPosition}), transitionDuration: 250}
       : NO_TRANSITION_PROPS;
@@ -778,12 +889,32 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     }
 
     const isTrackpad = event.pointerType === 'trackpad';
+    const handoffToStock = Boolean(
+      this._lastPinchEvent && (this._activeTarget || this._targetOverlap)
+    );
     const startCenter = {
-      x: currentCenter.x - (isTrackpad ? 0 : event.deltaX),
-      y: currentCenter.y - (isTrackpad ? 0 : event.deltaY)
+      x: currentCenter.x - (isTrackpad || handoffToStock ? 0 : event.deltaX),
+      y: currentCenter.y - (isTrackpad || handoffToStock ? 0 : event.deltaY)
     };
     const startEvent = {...event, offsetCenter: startCenter};
     const pos = this.getCenter(startEvent);
+    if (this._lastPinchEvent && (this._activeTarget || this._targetOverlap)) {
+      // Independent translation and pinch recognizers do not describe one atomic camera
+      // operation. Hand both to stock navigation from the displayed state, without replay.
+      const pinchEvent = this._lastPinchEvent;
+      this._releaseAllTargets(true);
+      this._targetOverlap = true;
+      this._pinchScaleOrigin = pinchEvent.scale;
+      this._startPinchRotation = pinchEvent.rotation;
+      const pinchPosition = this.getCenter(pinchEvent);
+      const rebased = this.controllerState
+        .zoomStart({pos: this.getZoomPosition(pinchPosition)})
+        .rotateStart({pos: pinchPosition});
+      this.state = rebased.getState();
+      this._controllerState = rebased;
+    } else if (!this._targetOverlap && this._isTargetPositionInBounds(pos)) {
+      this._acquireTarget(multiTouchDrag, isTrackpad ? 'trackpad' : 'touch', pos);
+    }
     const newControllerState =
       multiTouchDrag === 'pan'
         ? this.controllerState.panStart({pos}, this._getConstraintContext('pan', 'start'))
@@ -791,6 +922,8 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
 
     this._multiPanMode = multiTouchDrag;
     this._multiPanStartCenter = startCenter;
+    this._multiPanDeltaOrigin = handoffToStock ? [event.deltaX, event.deltaY] : [0, 0];
+    this._lastMultiPanEvent = startEvent;
     this.updateViewport(newControllerState, NO_TRANSITION_PROPS, {isDragging: true});
     return true;
   }
@@ -801,6 +934,7 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
       return false;
     }
 
+    this._lastMultiPanEvent = panEvent;
     return mode === 'pan' ? this._onPanMove(panEvent) : this._onPanRotate(panEvent);
   }
 
@@ -811,8 +945,14 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
       return false;
     }
 
+    if (this._targetOverlap && this._lastPinchEvent) {
+      this._resetMultiPan();
+      return true;
+    }
     const handled = mode === 'pan' ? this._onPanMoveEnd(panEvent) : this._onPanRotateEnd(panEvent);
     this._resetMultiPan();
+    this._targetOverlap = false;
+    if (handled) this._endTargetGesture(mode);
     return handled;
   }
 
@@ -841,8 +981,8 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
       event: {
         ...event,
         offsetCenter: {
-          x: startCenter.x + event.deltaX,
-          y: startCenter.y + event.deltaY
+          x: startCenter.x + event.deltaX - this._multiPanDeltaOrigin[0],
+          y: startCenter.y + event.deltaY - this._multiPanDeltaOrigin[1]
         }
       }
     };
@@ -851,6 +991,8 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
   private _resetMultiPan(): void {
     this._multiPanMode = null;
     this._multiPanStartCenter = null;
+    this._lastMultiPanEvent = null;
+    this._multiPanDeltaOrigin = [0, 0];
   }
 
   // Default handler for the `pinchstart` event.
@@ -861,6 +1003,37 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
       return false;
     }
 
+    this._pinchScaleOrigin = 1;
+    if (this._multiPanMode && this._activeTarget) {
+      this._releaseAllTargets(true);
+      this._targetOverlap = true;
+      const previous = this._lastMultiPanEvent || event;
+      this._multiPanStartCenter = {...previous.offsetCenter};
+      this._multiPanDeltaOrigin = [previous.deltaX, previous.deltaY];
+      const previousPosition = this.getCenter(previous);
+      const rebased =
+        this._multiPanMode === 'pan'
+          ? this.controllerState.panStart({pos: previousPosition})
+          : this.controllerState.rotateStart({pos: previousPosition});
+      this.state = rebased.getState();
+      this._controllerState = rebased;
+    }
+    const owners: Array<'zoom' | 'rotate'> = [
+      ...(this.touchZoom ? (['zoom'] as const) : []),
+      ...(this.touchRotate ? (['rotate'] as const) : [])
+    ];
+    if (
+      !this._targetOverlap &&
+      owners.length &&
+      (!this.touchZoom || !this.touchRotate || this.controllerState.zoomRotate)
+    ) {
+      this._acquireTarget(
+        'pinch',
+        event.pointerType === 'trackpad' ? 'trackpad' : 'touch',
+        this.getZoomPosition(pos),
+        owners
+      );
+    }
     const newControllerState = this.controllerState
       .zoomStart({pos: this.getZoomPosition(pos)}, this._getConstraintContext('zoom', 'start'))
       .rotateStart({pos}, this._getConstraintContext('rotate', 'start'));
@@ -881,22 +1054,31 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     }
 
     let newControllerState = this.controllerState;
-    if (this.touchZoom) {
-      const {scale} = event;
-      const pos = this.getCenter(event);
-      newControllerState = newControllerState.zoom(
-        {pos: this.getZoomPosition(pos), scale},
+    if (this._activeTarget && this.touchZoom && this.touchRotate && newControllerState.zoomRotate) {
+      newControllerState = newControllerState.zoomRotate(
+        {
+          scale: event.scale,
+          deltaAngleX: (this._startPinchRotation || 0) - event.rotation
+        },
         this._getConstraintContext('zoom', 'update')
       );
+    } else {
+      if (this.touchZoom) {
+        const scale = event.scale / this._pinchScaleOrigin;
+        const pos = this.getCenter(event);
+        newControllerState = newControllerState.zoom(
+          {pos: this.getZoomPosition(pos), scale},
+          this._getConstraintContext('zoom', 'update')
+        );
+      }
+      if (this.touchRotate) {
+        const {rotation} = event;
+        newControllerState = newControllerState.rotate(
+          {deltaAngleX: (this._startPinchRotation || 0) - rotation},
+          this._getConstraintContext('rotate', 'update')
+        );
+      }
     }
-    if (this.touchRotate) {
-      const {rotation} = event;
-      newControllerState = newControllerState.rotate(
-        {deltaAngleX: (this._startPinchRotation || 0) - rotation},
-        this._getConstraintContext('rotate', 'update')
-      );
-    }
-
     this.updateViewport(newControllerState, NO_TRANSITION_PROPS, {
       isDragging: true,
       isPanning: this.touchZoom,
@@ -911,15 +1093,32 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     if (!this.isDragging()) {
       return false;
     }
+    if (this._targetOverlap && this._multiPanMode) {
+      const previous = this._lastMultiPanEvent || event;
+      const position = this.getCenter(previous);
+      let rebased = this.controllerState.zoomEnd().rotateEnd();
+      rebased =
+        this._multiPanMode === 'pan'
+          ? rebased.panStart({pos: position})
+          : rebased.rotateStart({pos: position});
+      this._multiPanStartCenter = {...previous.offsetCenter};
+      this._multiPanDeltaOrigin = [previous.deltaX, previous.deltaY];
+      this._startPinchRotation = null;
+      this._lastPinchEvent = null;
+      this._pinchScaleOrigin = 1;
+      this.updateViewport(rebased, NO_TRANSITION_PROPS, {isDragging: true, isZooming: false});
+      return true;
+    }
     const {inertia} = this;
     const {_lastPinchEvent} = this;
     if (this.touchZoom && inertia && _lastPinchEvent && event.scale !== _lastPinchEvent.scale) {
       const pos = this.getCenter(event);
       const zoomPosition = this.getZoomPosition(pos);
       let newControllerState = this.controllerState.rotateEnd();
-      const z = Math.log2(event.scale);
+      const z = Math.log2(event.scale / this._pinchScaleOrigin);
       const velocityZ =
-        (z - Math.log2(_lastPinchEvent.scale)) / (event.deltaTime - _lastPinchEvent.deltaTime);
+        (z - Math.log2(_lastPinchEvent.scale / this._pinchScaleOrigin)) /
+        (event.deltaTime - _lastPinchEvent.deltaTime);
       const endScale = Math.pow(2, z + (velocityZ * inertia) / 2);
       newControllerState = newControllerState.zoom({pos: zoomPosition, scale: endScale}).zoomEnd();
 
@@ -958,6 +1157,10 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     }
     this._startPinchRotation = null;
     this._lastPinchEvent = null;
+    this._pinchScaleOrigin = 1;
+    this._targetOverlap = false;
+    this._endTargetGesture('zoom');
+    this._endTargetGesture('rotate');
     return true;
   }
 
@@ -976,7 +1179,7 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
 
     const isZoomOut = this.isFunctionKeyPressed(event);
     const zoomPosition = this.getZoomPosition(pos);
-
+    this._acquireTarget('zoom', 'doubleClick', zoomPosition, ['transition']);
     const newControllerState = this.controllerState.zoom({
       pos: zoomPosition,
       scale: isZoomOut ? 0.5 : 2
@@ -985,6 +1188,7 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
       isZooming: true,
       isPanning: true
     });
+    if (!this.transitionManager.transition.inProgress) this._releaseTargetOwner('transition');
     this.blockEvents(100);
     return true;
   }
@@ -1002,6 +1206,7 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     }
 
     this._doubleClickDragAnchor = this.getZoomPosition(pos);
+    this._acquireTarget('zoom', 'doubleClick', this._doubleClickDragAnchor);
     let newControllerState = this.controllerState.zoomStart(
       {pos: this._doubleClickDragAnchor},
       this._getConstraintContext('zoom', 'start')
@@ -1054,6 +1259,7 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
       isPanning: Boolean(reboundTransition),
       isZooming: Boolean(reboundTransition)
     });
+    this._endTargetGesture('zoom');
     this._suppressDoubleClickUntil = Date.now() + 100;
     this.blockEvents(100);
     return true;
@@ -1068,21 +1274,40 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     // @ts-ignore
     const {zoomSpeed, moveSpeed, rotateSpeedX, rotateSpeedY} =
       this.keyboard === true ? {} : this.keyboard;
+    const code = event.srcEvent.code;
+    if (['Minus', 'Equal', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(code)) {
+      const operation = code === 'Minus' || code === 'Equal' ? 'zoom' : funcKey ? 'rotate' : 'pan';
+      this._acquireTarget(operation, 'keyboard', null, ['transition']);
+    }
     const {controllerState} = this;
     let newControllerState;
     const interactionState: InteractionState = {};
 
     switch (event.srcEvent.code) {
       case 'Minus':
-        newControllerState = funcKey
-          ? controllerState.zoomOut(zoomSpeed).zoomOut(zoomSpeed)
-          : controllerState.zoomOut(zoomSpeed);
+        newControllerState =
+          this._activeTarget && controllerState.zoomByKeyboard
+            ? controllerState.zoomByKeyboard({
+                direction: 'out',
+                speed: zoomSpeed,
+                repeat: funcKey ? 2 : 1
+              })
+            : funcKey
+              ? controllerState.zoomOut(zoomSpeed).zoomOut(zoomSpeed)
+              : controllerState.zoomOut(zoomSpeed);
         interactionState.isZooming = true;
         break;
       case 'Equal':
-        newControllerState = funcKey
-          ? controllerState.zoomIn(zoomSpeed).zoomIn(zoomSpeed)
-          : controllerState.zoomIn(zoomSpeed);
+        newControllerState =
+          this._activeTarget && controllerState.zoomByKeyboard
+            ? controllerState.zoomByKeyboard({
+                direction: 'in',
+                speed: zoomSpeed,
+                repeat: funcKey ? 2 : 1
+              })
+            : funcKey
+              ? controllerState.zoomIn(zoomSpeed).zoomIn(zoomSpeed)
+              : controllerState.zoomIn(zoomSpeed);
         interactionState.isZooming = true;
         break;
       case 'ArrowLeft':
@@ -1125,6 +1350,7 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
         return false;
     }
     this.updateViewport(newControllerState, this._getTransitionProps(), interactionState);
+    if (!this.transitionManager.transition.inProgress) this._releaseTargetOwner('transition');
     return true;
   }
 
@@ -1146,5 +1372,315 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
           })
         }
       : transition;
+  }
+
+  /** Resolves one fresh numeric target. A configured provider is authoritative. */
+  protected resolveInteractionTarget(
+    screenPosition: [number, number] | null,
+    operation: InteractionTargetOperation,
+    source: InteractionTargetSource
+  ): InteractionTarget | null {
+    // Elastic MapState constraints require a separate target-aware rebound definition. Until that
+    // contract is implemented, preserve the complete stock rubber-band lifecycle.
+    if (!this.targetNavigation) {
+      return null;
+    }
+    const viewport = this.controllerState.getTargetNavigationViewport?.(operation);
+    if (!viewport) {
+      return null;
+    }
+
+    const configurationRevision = this._configurationRevision;
+    const provider = this.getInteractionTarget;
+    let resolved: InteractionTarget | null = null;
+    if (provider) {
+      resolved = provider({
+        viewId: this.props.id,
+        operation,
+        source,
+        screenPosition: screenPosition && [...screenPosition],
+        viewport
+      });
+    } else if (screenPosition && this.pickPosition) {
+      const picked = this.pickPosition(
+        this.props.x + screenPosition[0],
+        this.props.y + screenPosition[1]
+      );
+      if (
+        picked?.coordinate &&
+        picked.coordinate.length >= 3 &&
+        (!picked.viewport ||
+          (picked.viewport.id === viewport.id &&
+            picked.viewport.constructor === viewport.constructor))
+      ) {
+        resolved = {
+          coordinate: picked.coordinate.slice(0, 3) as [number, number, number],
+          screenPosition: [...screenPosition]
+        };
+      }
+    }
+
+    if (
+      configurationRevision !== this._configurationRevision ||
+      !this.targetNavigation ||
+      provider !== this.getInteractionTarget
+    ) {
+      return null;
+    }
+
+    return resolved;
+  }
+
+  /** Whether target navigation currently owns an acquired numeric coordinate. */
+  protected hasActiveInteractionTarget(): boolean {
+    return Boolean(this._activeTarget);
+  }
+
+  /** Builds camera-specific state while the base controller owns session lifetime. */
+  protected createInteractionTargetState(
+    target: InteractionTarget,
+    session: InteractionTargetSession
+  ): ControllerState {
+    return this.controllerState.withInteractionTarget!(target, session);
+  }
+
+  /** Guards application constraints against synchronous controller reconfiguration. */
+  protected runInteractionTargetConstraint<ResultT>(callback: () => ResultT): ResultT {
+    this._targetConstraintDepth++;
+    try {
+      return callback();
+    } finally {
+      this._targetConstraintDepth--;
+    }
+  }
+
+  private _endTargetGesture(owner: 'pan' | 'zoom' | 'rotate'): void {
+    if (this._activeTarget && this.transitionManager.transition.inProgress)
+      this._activeTargetOwners.add('transition');
+    this._releaseTargetOwner(owner);
+  }
+
+  private _isTargetPositionInBounds(pos: [number, number]): boolean {
+    return pos[0] >= 0 && pos[0] <= this.props.width && pos[1] >= 0 && pos[1] <= this.props.height;
+  }
+
+  /** Returns the pointer/touch origin, or the first recognized trackpad sample. */
+  private _getGestureAcquisitionPosition(event): [number, number] {
+    if (event.pointerType === 'trackpad') {
+      return this.getCenter(event);
+    }
+    const deltaX = Number.isFinite(event.deltaX) ? event.deltaX : 0;
+    const deltaY = Number.isFinite(event.deltaY) ? event.deltaY : 0;
+    return this.getCenter({
+      ...event,
+      offsetCenter: {
+        x: event.offsetCenter.x - deltaX,
+        y: event.offsetCenter.y - deltaY
+      }
+    });
+  }
+
+  private _acquireTarget(
+    operation: InteractionTargetOperation,
+    source: InteractionTargetSource,
+    screenPosition: [number, number] | null,
+    owners: Array<'pan' | 'zoom' | 'rotate' | 'transition' | 'wheel'> = [
+      operation === 'pinch' ? 'zoom' : operation
+    ] as Array<'pan' | 'zoom' | 'rotate' | 'transition' | 'wheel'>
+  ): InteractionTarget | null {
+    if (
+      !this.targetNavigation ||
+      !this.controllerState.getTargetNavigationViewport?.(operation) ||
+      !this.controllerState.validateInteractionTarget ||
+      !this.controllerState.withInteractionTarget ||
+      !this.controllerState.withoutInteractionTarget
+    )
+      return null;
+    if (this._activeTarget) {
+      const reuseActiveTarget =
+        owners.length === 1 && owners[0] === 'wheel' && this._activeTargetOwners.has('wheel');
+      if (reuseActiveTarget) {
+        for (const owner of owners) this._activeTargetOwners.add(owner);
+        return this._activeTarget;
+      }
+      // An active transition is a completed input session. A new gesture must acquire a fresh
+      // scene target; only an explicitly continued wheel burst may reuse its frozen snapshot.
+      this._releaseAllTargets(true);
+    }
+
+    try {
+      const configurationRevision = this._configurationRevision;
+      const resolved = copyInteractionTarget(
+        this.resolveInteractionTarget(screenPosition, operation, source)
+      );
+      const target = copyInteractionTarget(
+        resolved && this.controllerState.validateInteractionTarget(resolved)
+      );
+      if (
+        !target ||
+        !this.targetNavigation ||
+        configurationRevision !== this._configurationRevision
+      ) {
+        return null;
+      }
+      Object.freeze(target.coordinate);
+      Object.freeze(target.screenPosition);
+      Object.freeze(target);
+      this._activeTarget = target;
+      this._targetSessionGeneration++;
+      this._activeTargetViewStructure = getInteractionTargetStructure(this.props);
+      this._activeTargetViewportType =
+        this.controllerState.getTargetNavigationViewport?.()?.constructor;
+      for (const owner of owners) this._activeTargetOwners.add(owner);
+      this._installTargetState(target, operation, source, screenPosition);
+      return target;
+    } catch (error) {
+      this._releaseAllTargets(true);
+      this._setInteractionState({
+        interactionTargetPosition: undefined,
+        rotationPivotPosition: undefined
+      });
+      throw error;
+    }
+  }
+
+  private _acquireWheelTarget(screenPosition: [number, number]): InteractionTarget | null {
+    if (!this.targetNavigation || !this.controllerState.getTargetNavigationViewport?.('zoom'))
+      return null;
+    this._acquireTarget('zoom', 'wheel', screenPosition, ['wheel']);
+    if (!this._activeTarget) return null;
+    this._activeTargetOwners.add('transition');
+    if (this._wheelTargetTimer) {
+      clearTimeout(this._wheelTargetTimer);
+    }
+    this._wheelTargetTimer = setTimeout(() => {
+      this._wheelTargetTimer = null;
+      this._releaseTargetOwner('wheel');
+      if (!this.transitionManager.transition.inProgress) {
+        this._releaseTargetOwner('transition');
+      }
+    }, TARGET_WHEEL_RELEASE_MS);
+    return this._activeTarget;
+  }
+
+  private _installTargetState(
+    target: InteractionTarget,
+    operation: InteractionTargetOperation,
+    source: InteractionTargetSource,
+    inputOrigin: [number, number] | null
+  ): void {
+    const state = this.createInteractionTargetState(target, {
+      viewId: this.props.id,
+      operation,
+      source,
+      sessionId: this._targetSessionGeneration,
+      inputOrigin
+    });
+    this.state = state.getState();
+    this._controllerState = state;
+    this._setInteractionState({interactionTargetPosition: [...target.coordinate]});
+  }
+
+  private _releaseTargetOwner(owner: 'pan' | 'zoom' | 'rotate' | 'transition' | 'wheel'): void {
+    this._activeTargetOwners.delete(owner);
+    if (this._activeTargetOwners.size === 0) {
+      this._clearTargetState();
+    }
+  }
+
+  private _releaseAllTargets(cancelTransition: boolean = false): void {
+    if (cancelTransition) {
+      this._cancelTargetTransition();
+    }
+    if (this._wheelTargetTimer) {
+      clearTimeout(this._wheelTargetTimer);
+      this._wheelTargetTimer = null;
+    }
+    this._activeTargetOwners.clear();
+    this._clearTargetState(cancelTransition);
+  }
+
+  private _clearTargetState(cancelInteraction: boolean = false): void {
+    if (!this._activeTarget) {
+      return;
+    }
+    this._activeTarget = null;
+    this._activeTargetViewStructure = null;
+    this._activeTargetViewportType = null;
+    this._targetSessionGeneration++;
+    const state = this.controllerState.withoutInteractionTarget!();
+    this.state = state.getState();
+    this._controllerState = state;
+    this._setInteractionState({
+      interactionTargetPosition: undefined,
+      rotationPivotPosition: undefined,
+      ...(cancelInteraction
+        ? {
+            isDragging: false,
+            isPanning: false,
+            isZooming: false,
+            isRotating: false
+          }
+        : {})
+    });
+  }
+
+  private _areTargetViewportDimensionsEqual(props: ControllerProps): boolean {
+    return (
+      props.id === this.props.id &&
+      props.x === this.props.x &&
+      props.y === this.props.y &&
+      props.width === this.props.width &&
+      props.height === this.props.height
+    );
+  }
+
+  private _cancelTargetTransition(): void {
+    const transition = this.transitionManager.transition;
+    const interpolator = (transition.settings as {interpolator?: unknown}).interpolator;
+    if (transition.inProgress && interpolator instanceof TargetNavigationInterpolator) {
+      transition.cancel();
+    }
+  }
+
+  /** Attaches model-specific frame reconstruction without replacing the canonical scheduler. */
+  private _getTargetTransitionProps(
+    endState: ControllerState,
+    transitionProps: Record<string, any> | null
+  ): Record<string, any> | null {
+    if (!this.targetNavigation || !this._activeTarget || !transitionProps?.transitionDuration)
+      return transitionProps;
+    const interpolator = this.controllerState.createTargetNavigationInterpolator?.(
+      endState,
+      () => this.controllerState
+    );
+    if (!interpolator) return {...transitionProps, transitionDuration: 0};
+    const generation = this._targetSessionGeneration;
+    return {
+      ...transitionProps,
+      transitionInterpolator: interpolator,
+      onTransitionInterrupt: this._wrapTargetTransitionEnd(
+        generation,
+        transitionProps.onTransitionInterrupt
+      ),
+      onTransitionEnd: this._wrapTargetTransitionEnd(generation, transitionProps.onTransitionEnd)
+    };
+  }
+
+  private _wrapTargetTransitionEnd(
+    targetSessionGeneration: number,
+    callback?: (transition: any) => void
+  ) {
+    return transition => {
+      // A smooth wheel update interrupts the preceding transition immediately before starting
+      // the replacement. The wheel-burst owner bridges that internal restart.
+      if (
+        targetSessionGeneration === this._targetSessionGeneration &&
+        !this._activeTargetOwners.has('wheel')
+      ) {
+        this._releaseTargetOwner('transition');
+      }
+      callback?.(transition);
+    };
   }
 }

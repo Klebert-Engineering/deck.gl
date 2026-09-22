@@ -2,16 +2,19 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) vis.gl contributors
 
-import {clamp} from '@math.gl/core';
+import {clamp, vec3} from '@math.gl/core';
 import Controller from './controller';
+import type {ControllerOptions} from './controller';
+import type {TargetNavigationOptions} from './interaction-target';
 import {getMaxBoundsExtents, getMaxBoundsRect} from './utils';
 
 import {MapState, MapStateProps} from './map-controller';
 import type {MapStateInternal} from './map-controller';
-import {CONSTRAINT_AROUND, type ConstraintAround} from './view-state';
+import {CONSTRAINT_AROUND, type ConstraintAround, type ConstraintContext} from './view-state';
 import {mod} from '../utils/math-utils';
 import LinearInterpolator from '../transitions/linear-interpolator';
 import GlobeViewport, {zoomAdjust, GLOBE_RADIUS} from '../viewports/globe-viewport';
+import WebMercatorViewport from '../viewports/web-mercator-viewport';
 import {
   Globe,
   type CameraFrame,
@@ -23,6 +26,10 @@ import type {MjolnirGestureEvent} from 'mjolnir.js';
 
 const DEGREES_TO_RADIANS = Math.PI / 180;
 const RADIANS_TO_DEGREES = 180 / Math.PI;
+
+/** Globe controller options. GlobeView uses Web Mercator above its projection threshold. */
+export type GlobeControllerOptions = ControllerOptions &
+  TargetNavigationOptions<GlobeViewport | WebMercatorViewport>;
 
 function degreesToPixels(angle: number, zoom: number = 0): number {
   const radians = Math.min(180, angle) * DEGREES_TO_RADIANS;
@@ -77,6 +84,9 @@ class GlobeState extends MapState {
 
   pan({pos, startPos}: {pos: [number, number]; startPos?: [number, number]}): GlobeState {
     const state = this.getState() as GlobeStateInternal;
+    if (state.interactionTarget) {
+      return super.pan({pos, startPos}) as GlobeState;
+    }
     const startPanPos = state.startPanPos || startPos;
     if (!startPanPos) return this;
 
@@ -113,6 +123,9 @@ class GlobeState extends MapState {
   }
 
   _panFromCenter(offset: [number, number]): GlobeState {
+    if (this.getState().interactionTarget) {
+      return super._panFromCenter(offset) as GlobeState;
+    }
     const {width, height} = this.getViewportProps();
     const center: [number, number] = [width / 2, height / 2];
     return this.panStart({pos: center})
@@ -129,8 +142,19 @@ class GlobeState extends MapState {
     props.zoom = this._constrainZoom(props.zoom, props);
 
     if (constraintAround) {
-      const viewport = this.makeViewport(props) as GlobeViewport;
-      const anchorStrength = viewport.getZoomAnchorStrength(constraintAround.screenPosition);
+      const viewport = this.makeViewport(props);
+      // GlobeView switches to Web Mercator at high zoom. Do not call a spherical-only
+      // method on that viewport, including during ordinary (non-target) zoom.
+      if (viewport instanceof WebMercatorViewport) {
+        Object.assign(
+          props,
+          viewport.panByPosition(constraintAround.position, constraintAround.screenPosition)
+        );
+      }
+      const anchorStrength =
+        viewport instanceof GlobeViewport
+          ? viewport.getZoomAnchorStrength(constraintAround.screenPosition)
+          : 0;
       if (anchorStrength > 0) {
         const currentCoordinates = viewport.unproject(constraintAround.screenPosition);
         const cameraFrame = Globe.cameraFrame(props.longitude, props.latitude, props.bearing || 0);
@@ -231,6 +255,161 @@ class GlobeState extends MapState {
     return props;
   }
 
+  _getTargetViewport(
+    props: Required<MapStateProps> = this.getViewportProps()
+  ): GlobeViewport | WebMercatorViewport | null {
+    const viewport = this.makeViewport(props);
+    return (viewport instanceof GlobeViewport || viewport instanceof WebMercatorViewport) &&
+      viewport.supportsTargetNavigation
+      ? viewport
+      : null;
+  }
+
+  /** Spherical pan preserves the rigid camera frame and effective magnification, not map XY. */
+  _getTargetPanUpdatedState(
+    screenPosition: [number, number],
+    constraintContext?: ConstraintContext
+  ): MapState {
+    const state = this.getState();
+    const sourceViewport = state.targetNavigationStartViewport;
+    if (!(sourceViewport instanceof GlobeViewport)) {
+      return super._getTargetPanUpdatedState(screenPosition, constraintContext);
+    }
+    const target = state.interactionTarget;
+    if (!target) return this;
+    const requested = sourceViewport.getTargetPanViewState({
+      target: target.coordinate,
+      screenPosition
+    });
+    if (!requested) return this;
+    if (
+      this.makeViewport({...this.getViewportProps(), ...requested}).constructor !==
+      sourceViewport.constructor
+    ) {
+      // End this session at the projection seam. Rebase the remaining drag at this sample.
+      const viewport = this.makeViewport(this.getViewportProps());
+      const previousPixel = viewport.project(target.coordinate).slice(0, 2) as [number, number];
+      let candidate = this.withoutInteractionTarget()
+        .panStart({pos: previousPixel})
+        .pan({pos: screenPosition}) as GlobeState;
+      const candidateViewport = candidate._getTargetViewport();
+      if (
+        candidateViewport &&
+        (viewport instanceof GlobeViewport || viewport instanceof WebMercatorViewport)
+      ) {
+        candidate = candidate._getUpdatedState({
+          position: this._getProjectionHandoffPosition(viewport, candidateViewport)
+        }) as GlobeState;
+      }
+      const inputOrigin = state.targetNavigationInputOrigin || target.screenPosition;
+      candidate = candidate.panStart({
+        pos: [
+          inputOrigin[0] + screenPosition[0] - target.screenPosition[0],
+          inputOrigin[1] + screenPosition[1] - target.screenPosition[1]
+        ]
+      });
+      return candidate;
+    }
+    const candidate = this._getTargetUpdatedState(
+      requested,
+      screenPosition,
+      undefined,
+      constraintContext
+    );
+    const viewport = candidate._getTargetViewport();
+    if (
+      !(viewport instanceof GlobeViewport) ||
+      Math.abs(viewport.scale / sourceViewport.scale - 1) > 1e-8 ||
+      Math.abs(viewport.pitch - sourceViewport.pitch) > 1e-8 ||
+      Math.abs(
+        vec3.length(viewport.cameraPosition) / vec3.length(sourceViewport.cameraPosition) - 1
+      ) > 1e-8
+    ) {
+      return this;
+    }
+    return candidate;
+  }
+
+  _getTargetPoseUpdatedState(
+    pose: {bearing?: number; pitch?: number; zoom?: number},
+    constraintContext?: ConstraintContext,
+    expectedDistance?: number,
+    screenPosition?: readonly [number, number]
+  ): MapState {
+    const state = this.getState();
+    const sourceViewport = state.targetNavigationStartViewport;
+    const props = this.getViewportProps();
+    const nextViewport = this.makeViewport({...props, ...pose});
+    if (sourceViewport && nextViewport.constructor !== sourceViewport.constructor) {
+      const currentViewport = this.makeViewport(props);
+      if (
+        !(
+          currentViewport instanceof GlobeViewport || currentViewport instanceof WebMercatorViewport
+        ) ||
+        !(nextViewport instanceof GlobeViewport || nextViewport instanceof WebMercatorViewport)
+      )
+        return this;
+      const pixel = state.targetNavigationScreenPosition!;
+      // This is deliberately a stock handoff, not a cross-projection target animation.
+      // Retain accumulated gesture starts so the next pinch sample does not replay its delta.
+      return this.withoutInteractionTarget()._getUpdatedState(
+        {
+          ...pose,
+          position: this._getProjectionHandoffPosition(currentViewport, nextViewport),
+          startZoom: state.startZoom,
+          startZoomLngLat: currentViewport.unproject(pixel),
+          startRotatePos: state.startRotatePos,
+          startBearing: state.startBearing,
+          startPitch: state.startPitch,
+          [CONSTRAINT_AROUND]: {position: currentViewport.unproject(pixel), screenPosition: pixel}
+        },
+        constraintContext
+      );
+    }
+    // At fixed geographic center the spherical distance curve is exponential in zoom.
+    // The viewport supplies the spherical inverse; no Mercator inverse is used here.
+    return super._getTargetPoseUpdatedState(
+      pose,
+      constraintContext,
+      expectedDistance,
+      screenPosition
+    );
+  }
+
+  /** Convert the existing offset between Globe's global axes and Mercator's local ENU axes. */
+  private _getProjectionHandoffPosition(
+    source: GlobeViewport | WebMercatorViewport,
+    destination: GlobeViewport | WebMercatorViewport
+  ): number[] {
+    if (source.constructor === destination.constructor) return [...source.position];
+    const longitude = source.longitude * DEGREES_TO_RADIANS;
+    const latitude = source.latitude * DEGREES_TO_RADIANS;
+    const east = [Math.cos(longitude), Math.sin(longitude), 0];
+    const north = [
+      -Math.sin(longitude) * Math.sin(latitude),
+      Math.cos(longitude) * Math.sin(latitude),
+      Math.cos(latitude)
+    ];
+    const up = [
+      Math.sin(longitude) * Math.cos(latitude),
+      -Math.cos(longitude) * Math.cos(latitude),
+      Math.sin(latitude)
+    ];
+    if (source instanceof GlobeViewport) {
+      return [
+        vec3.dot(source.position, east),
+        vec3.dot(source.position, north),
+        vec3.dot(source.position, up)
+      ];
+    }
+    return [0, 1, 2].map(
+      index =>
+        east[index] * source.position[0] +
+        north[index] * source.position[1] +
+        up[index] * source.position[2]
+    );
+  }
+
   _constrainZoom(zoom: number, props?: Required<MapStateProps>): number {
     props ||= this.getViewportProps();
     const {maxZoom, maxBounds} = props;
@@ -317,6 +496,12 @@ export default class GlobeController extends Controller<MapState> {
   }
 
   protected _onPanMoveEnd(event: MjolnirGestureEvent): boolean {
+    if (this.hasActiveInteractionTarget()) {
+      // Target inertia extrapolates the target pixel; every frame uses the spherical solve.
+      // The ordinary globe-frame inertia below remains unchanged for stock navigation.
+      this._panHistory = [];
+      return super._onPanMoveEnd(event);
+    }
     const {inertia} = this;
     if (this.dragPan && inertia && this._panHistory.length >= 2) {
       const first = this._panHistory[0];

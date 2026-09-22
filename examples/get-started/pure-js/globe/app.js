@@ -3,7 +3,13 @@
 // Copyright (c) vis.gl contributors
 
 import {Deck, _GlobeView as GlobeView} from '@deck.gl/core';
-import {SolidPolygonLayer, GeoJsonLayer, ArcLayer} from '@deck.gl/layers';
+import {
+  SolidPolygonLayer,
+  GeoJsonLayer,
+  ArcLayer,
+  ScatterplotLayer,
+  LineLayer
+} from '@deck.gl/layers';
 
 // source: Natural Earth http://www.naturalearthdata.com/ via geojson.xyz
 const COUNTRIES =
@@ -17,11 +23,53 @@ const INITIAL_VIEW_STATE = {
   zoom: 0
 };
 
+// Opt into the elevated-target demonstration with ?target-navigation.
+const targetNavigation = new URLSearchParams(window.location.search).has('target-navigation');
+const interactionCoordinate = [30, 20, 100000];
+
 new Deck({
-  views: new GlobeView(),
-  initialViewState: INITIAL_VIEW_STATE,
-  controller: true,
+  views: new GlobeView({
+    controller: targetNavigation
+      ? {
+          _targetNavigation: true,
+          touchRotate: true,
+          inertia: 300,
+          getInteractionTarget: ({viewport}) => {
+            const information = viewport.getTargetInfo(interactionCoordinate);
+            return information?.isVisible
+              ? {
+                  coordinate: [...interactionCoordinate],
+                  screenPosition: information.projectedPosition.slice(0, 2),
+                  minimumTargetDistance: 1000
+                }
+              : null;
+          }
+        }
+      : true
+  }),
+  initialViewState: targetNavigation
+    ? {...INITIAL_VIEW_STATE, zoom: 4, pitch: 35}
+    : INITIAL_VIEW_STATE,
   layers: [
+    targetNavigation &&
+      new ScatterplotLayer({
+        id: 'elevated-target',
+        data: [interactionCoordinate],
+        getPosition: position => position,
+        getRadius: 20000,
+        radiusMinPixels: 6,
+        getFillColor: [255, 200, 0],
+        pickable: '3d'
+      }),
+    targetNavigation &&
+      new LineLayer({
+        id: 'target-height',
+        data: [interactionCoordinate],
+        getSourcePosition: position => [position[0], position[1], 0],
+        getTargetPosition: position => position,
+        getColor: [255, 200, 0],
+        getWidth: 2
+      }),
     // A GeoJSON polygon that covers the entire earth
     // See /docs/api-reference/globe-view.md#remarks
     new SolidPolygonLayer({

@@ -156,6 +156,21 @@ export type {
   MapInteractionTargetViewStateContext,
   ConstrainMapInteractionTargetViewState
 } from './controllers/map-controller';
+export type {GlobeControllerOptions} from './controllers/globe-controller';
+export type {
+  InteractionTarget,
+  InteractionTargetOperation,
+  InteractionTargetSource,
+  InteractionTargetContext,
+  GetInteractionTarget,
+  TargetNavigationOptions
+} from './controllers/interaction-target';
+export type {
+  GlobeTargetInfo,
+  GlobeTargetViewState,
+  GlobeTargetViewStateOptions,
+  GlobeTargetPanViewStateOptions
+} from './viewports/globe-viewport';
 export type {
   WebMercatorTargetInfo,
   WebMercatorTargetPanViewStateOptions,

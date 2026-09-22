@@ -7,6 +7,9 @@ import {altitudeToFovy, fovyToAltitude, MAX_LATITUDE} from '@math.gl/web-mercato
 import Viewport from './viewport';
 import {PROJECTION_MODE} from '../lib/constants';
 import {mod} from '../utils/math-utils';
+import {Globe, zoomAdjust} from './globe-utils';
+export {zoomAdjust} from './globe-utils';
+import type {TargetInfo} from './target-navigation';
 
 const DEGREES_TO_RADIANS = Math.PI / 180;
 const RADIANS_TO_DEGREES = 180 / Math.PI;
@@ -61,6 +64,12 @@ export type GlobeViewportOptions = {
   altitude?: number;
   /* Meter offsets of the viewport center from lng, lat, elevation */
   position?: number[];
+  /** Padding around the viewport in CSS pixels. */
+  padding?: Viewport['padding'];
+  /** Optional transform of the center offset. Unsupported by target navigation. */
+  modelMatrix?: number[] | null;
+  /** Custom projection. Unsupported by target navigation. */
+  projectionMatrix?: number[];
   /** Zoom level */
   zoom?: number;
   /** Use orthographic projection */
@@ -79,6 +88,37 @@ export type GlobeViewportOptions = {
   resolution?: number;
 };
 
+/** Canonical state reconstructed by the spherical target-navigation operations. */
+export type GlobeTargetViewState = {
+  longitude: number;
+  latitude: number;
+  bearing: number;
+  pitch: number;
+  zoom: number;
+  /** Globe Cartesian meter offset, in the same basis as GlobeViewport.position. */
+  position: [number, number, number];
+};
+
+/** Options for a perspective spherical target orbit or zoom. */
+export type GlobeTargetViewStateOptions = {
+  target: [number, number, number];
+  screenPosition: [number, number];
+  bearing?: number;
+  pitch?: number;
+  zoom?: number;
+  /** Minimum camera-to-target distance in metres; zero disables the floor. */
+  minimumTargetDistance?: number;
+};
+
+/** Options for spherical target panning using a rigid camera-frame rotation. */
+export type GlobeTargetPanViewStateOptions = Pick<
+  GlobeTargetViewStateOptions,
+  'target' | 'screenPosition'
+>;
+
+/** Camera-relative target measurements; distances are in metres or view space as documented. */
+export type GlobeTargetInfo = TargetInfo;
+
 export default class GlobeViewport extends Viewport {
   static displayName = 'GlobeViewport';
 
@@ -88,6 +128,9 @@ export default class GlobeViewport extends Viewport {
   pitch: number;
   fovy: number;
   resolution: number;
+  /** Whether the viewport supports the standard perspective target-navigation transforms. */
+  readonly supportsTargetNavigation: boolean;
+  private readonly _targetNavigationOptions: GlobeViewportOptions;
 
   constructor(opts: GlobeViewportOptions = {}) {
     const {
@@ -171,6 +214,214 @@ export default class GlobeViewport extends Viewport {
     this.pitch = pitch;
     this.fovy = fovy;
     this.resolution = resolution;
+    this._targetNavigationOptions = {...opts};
+    this.supportsTargetNavigation =
+      !opts.orthographic &&
+      !opts.projectionMatrix &&
+      !opts.modelMatrix &&
+      (opts.width === undefined || (Number.isFinite(opts.width) && opts.width > 0)) &&
+      (opts.height === undefined || (Number.isFinite(opts.height) && opts.height > 0));
+  }
+
+  /** Measures a target on or above the globe, rejecting clipped and planet-occluded points. */
+  getTargetInfo(target: [number, number, number]): GlobeTargetInfo | null {
+    if (
+      !this.supportsTargetNavigation ||
+      !Array.isArray(target) ||
+      target.length !== 3 ||
+      !target.every(Number.isFinite) ||
+      Math.abs(target[1]) > 90 ||
+      target[2] < 0
+    ) {
+      return null;
+    }
+    const commonTarget = this.projectPosition(target);
+    const projectedPosition = this.project(target) as [number, number, number];
+    const cameraTarget = new Matrix4(this.viewMatrix).transformAsPoint(commonTarget);
+    const cameraDepth = -cameraTarget[2];
+    const near = this.projectionMatrix[14] / (this.projectionMatrix[10] - 1);
+    const far = this.projectionMatrix[14] / (this.projectionMatrix[10] + 1);
+    const direction = vec3.sub([], commonTarget, this.cameraPosition);
+    const distanceSquared = vec3.squaredLength(direction);
+    const targetDistance = Math.sqrt(distanceSquared) * this.distanceScales.metersPerUnit[0];
+    // Test the finite camera-to-target segment, not an infinite ray. Elevated points beyond
+    // the surface horizon can still be visible when the segment clears the reference sphere.
+    const closestProgress = Math.max(
+      0,
+      Math.min(1, -vec3.dot(this.cameraPosition, direction) / distanceSquared)
+    );
+    const closestPoint = vec3.scaleAndAdd([], this.cameraPosition, direction, closestProgress);
+    const clearsGlobe = vec3.length(closestPoint) >= GLOBE_RADIUS * (1 - 1e-12);
+    const isValid =
+      [...projectedPosition, cameraDepth, near, far, targetDistance].every(Number.isFinite) &&
+      near > 0 &&
+      far > near &&
+      cameraDepth > near &&
+      cameraDepth < far &&
+      targetDistance > 0 &&
+      clearsGlobe;
+    return {
+      target: [...target],
+      projectedPosition,
+      targetDistance,
+      cameraDepth,
+      near,
+      far,
+      isValid,
+      isVisible:
+        isValid &&
+        projectedPosition[0] >= 0 &&
+        projectedPosition[0] <= this.width &&
+        projectedPosition[1] >= 0 &&
+        projectedPosition[1] <= this.height
+    };
+  }
+
+  /**
+   * Reconstructs a target-relative perspective pose in the source geographic frame.
+   * The target pixel is fixed and distance follows the requested scale at this latitude.
+   * The returned Cartesian offset is part of the canonical Globe camera representation;
+   * rebuild it with the source view's lens, padding and clipping configuration.
+   * Returns null for unsupported projections or an invalid/clipped/occluded pose.
+   */
+  getTargetViewState(options: GlobeTargetViewStateOptions): GlobeTargetViewState | null {
+    const {target, screenPosition, minimumTargetDistance = 0} = options;
+    const bearing = options.bearing ?? this.bearing;
+    const pitch = options.pitch ?? this.pitch;
+    let zoom = options.zoom ?? this.zoom;
+    const targetInfo = this.getTargetInfo(target);
+    if (
+      !targetInfo?.isValid ||
+      !Array.isArray(screenPosition) ||
+      screenPosition.length !== 2 ||
+      ![...screenPosition, bearing, pitch, zoom, minimumTargetDistance].every(Number.isFinite) ||
+      minimumTargetDistance < 0
+    ) {
+      return null;
+    }
+    if (minimumTargetDistance > 0) {
+      zoom = Math.min(
+        zoom,
+        this.zoom +
+          Math.log2(
+            targetInfo.targetDistance / Math.min(minimumTargetDistance, targetInfo.targetDistance)
+          )
+      );
+    }
+    const reference = new GlobeViewport({
+      ...this._targetNavigationOptions,
+      longitude: this.longitude,
+      latitude: this.latitude,
+      bearing,
+      pitch,
+      zoom,
+      position: [0, 0, 0]
+    });
+    const rayPosition = new Matrix4(reference.pixelUnprojectionMatrix).transformAsPoint([
+      ...screenPosition,
+      0
+    ]);
+    const direction = vec3.normalize([], vec3.sub([], rayPosition, reference.cameraPosition));
+    const commonDistance =
+      targetInfo.targetDistance * 2 ** (this.zoom - zoom) * this.distanceScales.unitsPerMeter[0];
+    const cameraPosition = vec3.scaleAndAdd(
+      [],
+      this.projectPosition(target),
+      direction,
+      -commonDistance
+    );
+    const position = vec3.scale(
+      [],
+      vec3.sub([], cameraPosition, reference.cameraPosition),
+      this.distanceScales.metersPerUnit[0]
+    ) as [number, number, number];
+    return this._validateTargetViewState(
+      {longitude: this.longitude, latitude: this.latitude, bearing, pitch, zoom, position},
+      target,
+      screenPosition
+    );
+  }
+
+  /** Rotates the spherical camera frame to move a target to a new view-local pixel. */
+  getTargetPanViewState(options: GlobeTargetPanViewStateOptions): GlobeTargetViewState | null {
+    const {target, screenPosition} = options;
+    if (
+      !this.getTargetInfo(target)?.isValid ||
+      !Array.isArray(screenPosition) ||
+      screenPosition.length !== 2 ||
+      !screenPosition.every(Number.isFinite)
+    ) {
+      return null;
+    }
+    const currentTarget = this.unproject(screenPosition, {targetZ: target[2]});
+    const currentProjection = this.project(currentTarget);
+    if (
+      Math.hypot(
+        currentProjection[0] - screenPosition[0],
+        currentProjection[1] - screenPosition[1]
+      ) > 0.1
+    ) {
+      return null;
+    }
+    const currentDirection = vec3.normalize([], this.projectPosition(currentTarget));
+    const targetDirection = vec3.normalize([], this.projectPosition(target));
+    const axis = vec3.cross([], currentDirection, targetDirection);
+    const axisLength = vec3.length(axis);
+    const angle = Math.atan2(axisLength, vec3.dot(currentDirection, targetDirection));
+    if (axisLength < 1e-12 && angle > 1e-12) {
+      return null;
+    }
+    const frame = Globe.rotateFrameToMatch(
+      Globe.cameraFrame(this.longitude, this.latitude, this.bearing),
+      [currentTarget[0], currentTarget[1]],
+      [target[0], target[1]]
+    );
+    const position = (
+      axisLength > 0
+        ? Globe.rotate(this.position, vec3.scale([], axis, 1 / axisLength), angle)
+        : [...this.position]
+    ) as [number, number, number];
+    return this._validateTargetViewState(
+      {
+        longitude: frame.longitude,
+        latitude: frame.latitude,
+        bearing: frame.bearing,
+        pitch: this.pitch,
+        zoom: this.zoom + zoomAdjust(frame.latitude, true) - zoomAdjust(this.latitude, true),
+        position
+      },
+      target,
+      screenPosition
+    );
+  }
+
+  /** Rebuilds a candidate before accepting its camera representation and target projection. */
+  private _validateTargetViewState(
+    state: GlobeTargetViewState,
+    target: [number, number, number],
+    screenPosition: [number, number]
+  ): GlobeTargetViewState | null {
+    if (
+      ![
+        state.longitude,
+        state.latitude,
+        state.bearing,
+        state.pitch,
+        state.zoom,
+        ...state.position
+      ].every(Number.isFinite)
+    ) {
+      return null;
+    }
+    const viewport = new GlobeViewport({...this._targetNavigationOptions, ...state});
+    const info = viewport.getTargetInfo(target);
+    return info?.isValid &&
+      Math.hypot(
+        info.projectedPosition[0] - screenPosition[0],
+        info.projectedPosition[1] - screenPosition[1]
+      ) <= 0.1
+      ? state
+      : null;
   }
 
   get projectionMode() {
@@ -415,14 +666,6 @@ export default class GlobeViewport extends Viewport {
     nextViewState.zoom += zoomAdjust(nextViewState.latitude);
     return nextViewState;
   }
-}
-
-export function zoomAdjust(latitude: number, clampToPoles?: boolean): number {
-  if (clampToPoles) {
-    latitude = Math.max(Math.min(latitude, MAX_LATITUDE), -MAX_LATITUDE);
-  }
-  const scaleAdjust = Math.PI * Math.cos((latitude * Math.PI) / 180);
-  return Math.log2(scaleAdjust);
 }
 
 function transformVector(matrix: number[], vector: number[]): number[] {

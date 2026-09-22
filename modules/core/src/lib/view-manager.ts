@@ -92,7 +92,11 @@ type ViewManagerProps<ViewsT extends ViewOrViews> = {
   viewState: ViewStateObject<ViewsT> | null;
   onViewStateChange?: (params: ViewStateChangeParameters<AnyViewStateOf<ViewsT>>) => void;
   onInteractionStateChange?: (state: InteractionState) => void;
-  pickPosition?: (x: number, y: number, viewId?: string) => {coordinate?: number[]} | null;
+  pickPosition?: (
+    x: number,
+    y: number,
+    viewId?: string
+  ) => {coordinate?: number[]; viewport?: Viewport} | null;
   width?: number;
   height?: number;
   /** Resolve existing luma contexts, which own all canvas resize and pixel-size tracking. */
@@ -122,7 +126,11 @@ export default class ViewManager<ViewsT extends View[]> {
     onViewStateChange?: (params: ViewStateChangeParameters) => void;
     onInteractionStateChange?: (state: InteractionState) => void;
   };
-  private _pickPosition?: (x: number, y: number, viewId?: string) => {coordinate?: number[]} | null;
+  private _pickPosition?: (
+    x: number,
+    y: number,
+    viewId?: string
+  ) => {coordinate?: number[]; viewport?: Viewport} | null;
   /** Context lookup supplied by Deck; context dimensions remain owned and observed by luma. */
   private _getCanvasContext?: CanvasContextResolver;
 
