@@ -99,6 +99,8 @@ function createControllerHarness({
     interactionStates,
     viewStateChanges,
     getProps: () => currentProps,
+    getAcceptedViewport: () =>
+      view.makeViewport({...canvasSize, viewState: currentProps}) as WebMercatorViewport,
     getViewportProps: () => controller.controllerState.getViewportProps(),
     getViewport: () =>
       view.makeViewport({
@@ -287,10 +289,74 @@ function expectTargetInvariant(
   }
 }
 
+function mockTerrainFrames() {
+  let now = 1000;
+  vi.spyOn(Date, 'now').mockImplementation(() => now);
+  const frames = new Map<number, FrameRequestCallback>();
+  let nextId = 0;
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    frames.set(++nextId, callback);
+    return nextId;
+  });
+  vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
+  return {
+    frames,
+    step(elapsed = 501) {
+      now += elapsed;
+      const entry = frames.entries().next().value!;
+      expect(entry).toBeDefined();
+      frames.delete(entry[0]);
+      entry[1](now);
+    }
+  };
+}
+
+function expectSameCamera(before: WebMercatorViewport, after: WebMercatorViewport) {
+  // Compare both poses in the SOURCE metric, not each viewport's changing latitude scale.
+  const meters = before.distanceScales.metersPerUnit;
+  const error = Math.hypot(
+    ...before.cameraPosition.map((value, i) => (after.cameraPosition[i] - value) * meters[i])
+  );
+  const distance = Math.hypot(
+    ...before.cameraPosition.map((value, i) => (value - before.center[i]) * meters[i])
+  );
+  expect(error, 'physical camera translation (meters)').toBeLessThanOrEqual(
+    Math.max(0.01, distance * 1e-7)
+  );
+  expect(after.fovy).toBe(before.fovy);
+  expect(after.bearing).toBe(before.bearing);
+  expect(after.pitch).toBe(before.pitch);
+  for (const pixel of [
+    [240, 220],
+    [400, 300],
+    [540, 380]
+  ]) {
+    for (const altitude of [0, 180]) {
+      const coordinate = before.unproject(pixel, {targetZ: altitude});
+      const projected = after.project(coordinate);
+      expect(Math.hypot(projected[0] - pixel[0], projected[1] - pixel[1])).toBeLessThanOrEqual(0.1);
+    }
+  }
+}
+
+function runTargetOrbit(controller: MapController) {
+  const end: [number, number] = [POINTER[0] + 60, POINTER[1] + 40];
+  const options = {pointerType: 'mouse', rightButton: true};
+  controller.handleEvent(makeGestureEvent('panstart', POINTER, options) as any);
+  controller.handleEvent(
+    makeGestureEvent('panmove', end, {...options, deltaX: 60, deltaY: 40}) as any
+  );
+  controller.handleEvent(
+    makeGestureEvent('panend', end, {...options, deltaX: 60, deltaY: 40}) as any
+  );
+}
+
 afterEach(() => {
+  // Restore the stub's saved fake rAF BEFORE restoring real timers. Reversing this order
+  // leaves a fake animation-frame scheduler installed for subsequent rendered test files.
+  vi.unstubAllGlobals();
   vi.useRealTimers();
   vi.restoreAllMocks();
-  vi.unstubAllGlobals();
 });
 
 describe('MapController target navigation', () => {
@@ -2407,6 +2473,364 @@ describe('MapController target navigation', () => {
     );
     expect(getCanonicalCameraState(harness)).toEqual(beforeIgnoredMove);
     harness.controller.finalize();
+  });
+
+  it.each(['cold', 'warm'])(
+    'preserves the complete camera on %s Terrain handoff after elevated orbit',
+    cache => {
+      const clock = mockTerrainFrames();
+      let target: MapInteractionTarget | null = null;
+      const picker = vi.fn(() => ({coordinate: [8.5, 47.3, 300]}));
+      const harness = createControllerHarness({
+        ControllerClass: TerrainController,
+        controllerOptions: {_targetNavigation: true, getInteractionTarget: () => target},
+        pickPosition: picker
+      });
+      try {
+        if (cache === 'warm') clock.step();
+        target = harness.makeTarget(POINTER, 180);
+        runTargetOrbit(harness.controller);
+        const before = harness.getAcceptedViewport();
+        expect(Math.abs(before.center[2])).toBeGreaterThan(0);
+        expectTargetCleared(harness.getInteractionState());
+        clock.step();
+        expect(picker).toHaveBeenCalledTimes(cache === 'warm' ? 2 : 1);
+        expectSameCamera(before, harness.getAcceptedViewport());
+
+        // A provider miss must not let the warm, pre-orbit elevation overwrite the pose.
+        target = null;
+        harness.controller.handleEvent(makeGestureEvent('panstart') as any);
+        expectSameCamera(before, harness.getAcceptedViewport());
+        harness.controller.handleEvent(makeGestureEvent('panend') as any);
+      } finally {
+        harness.controller.finalize();
+      }
+      expect(clock.frames.size).toBe(0);
+    }
+  );
+
+  it.each([false, true])(
+    'preserves an initial XYZ camera when Terrain initializes (target option %s, provider null)',
+    enabled => {
+      const clock = mockTerrainFrames();
+      const harness = createControllerHarness({
+        ControllerClass: TerrainController,
+        initialViewState: {position: [120, -70, 90]},
+        controllerOptions: {_targetNavigation: enabled, getInteractionTarget: () => null},
+        pickPosition: () => ({coordinate: [8.5, 47.3, 300]})
+      });
+      try {
+        const before = harness.getAcceptedViewport();
+        clock.step();
+        expectSameCamera(before, harness.getAcceptedViewport());
+        harness.controller.handleEvent(makeGestureEvent('panstart') as any);
+        expectSameCamera(before, harness.getAcceptedViewport());
+        harness.controller.handleEvent(makeGestureEvent('panend') as any);
+      } finally {
+        harness.controller.finalize();
+      }
+      expect(clock.frames.size).toBe(0);
+    }
+  );
+
+  it.each([
+    {name: 'padding and lens', viewOptions: {padding: {left: 130, top: 70}, fovy: 55}},
+    {
+      name: 'invertible model matrix',
+      viewOptions: {modelMatrix: new Matrix4().rotateX(0.2).scale([2, 3, 4])}
+    },
+    {name: 'high latitude', initialViewState: {latitude: 75}},
+    {name: 'wrapped longitude', initialViewState: {longitude: 368.5}},
+    {name: 'rendered world copy', viewOptions: {worldOffset: 1}}
+  ])('rebases Terrain with $name without changing its camera', options => {
+    const clock = mockTerrainFrames();
+    const latitude = options.initialViewState?.latitude ?? INITIAL_VIEW_STATE.latitude;
+    const harness = createControllerHarness({
+      ...options,
+      ControllerClass: TerrainController,
+      initialViewState: {position: [120, -70, 90], ...options.initialViewState},
+      pickPosition: () => ({coordinate: [8.5, latitude, 150]})
+    });
+    harness.viewStateChanges.length = 0;
+    try {
+      const before = harness.getAcceptedViewport();
+      clock.step();
+      expect(harness.viewStateChanges).toHaveLength(1);
+      expectSameCamera(before, harness.getAcceptedViewport());
+    } finally {
+      harness.controller.finalize();
+    }
+  });
+
+  it.each([
+    'miss',
+    'nonfinite',
+    'other view',
+    'other projection',
+    'stale camera',
+    'above camera',
+    'zoom constraint'
+  ])('leaves a failed Terrain handoff atomic (%s), then accepts a fresh valid sample', failure => {
+    const clock = mockTerrainFrames();
+    let sample: {coordinate?: number[]; viewport?: WebMercatorViewport} | null = null;
+    const harness = createControllerHarness({
+      ControllerClass: TerrainController,
+      initialViewState: {position: [100, -40, 90]},
+      pickPosition: () => sample
+    });
+    harness.viewStateChanges.length = 0;
+    try {
+      const before = harness.getAcceptedViewport();
+      const coordinate = [8.5, 47.3, 300];
+      sample = failure === 'miss' ? null : {coordinate};
+      if (failure === 'nonfinite') sample = {coordinate: [8.5, 47.3, NaN]};
+      if (failure === 'above camera') sample = {coordinate: [8.5, 47.3, 1e9]};
+      if (failure === 'other view')
+        sample = {coordinate, viewport: new WebMercatorViewport({id: 'other'})};
+      if (failure === 'other projection')
+        sample = {
+          coordinate,
+          viewport: new WebMercatorViewport({id: 'target-map', orthographic: true})
+        };
+      if (failure === 'stale camera')
+        sample = {coordinate, viewport: new WebMercatorViewport({...harness.getProps(), zoom: 14})};
+      if (failure === 'zoom constraint') harness.updateProps({maxZoom: 13});
+      clock.step();
+      expect(harness.viewStateChanges).toHaveLength(0);
+      harness.controller.handleEvent(makeGestureEvent('panstart') as any);
+      expectSameCamera(before, harness.getAcceptedViewport());
+      harness.controller.handleEvent(makeGestureEvent('panend') as any);
+      harness.updateProps({maxZoom: 20});
+      sample = {coordinate};
+      const count = harness.viewStateChanges.length;
+      clock.step();
+      expect(harness.viewStateChanges).toHaveLength(count + 1);
+      expectSameCamera(before, harness.getAcceptedViewport());
+    } finally {
+      harness.controller.finalize();
+    }
+  });
+
+  it.each(['manual', 'none'] as const)(
+    'waits for %s controlled feedback without repeated Terrain proposals',
+    feedback => {
+      const clock = mockTerrainFrames();
+      const harness = createControllerHarness({
+        ControllerClass: TerrainController,
+        feedback,
+        initialViewState: {position: [120, -70, 90]},
+        pickPosition: () => ({coordinate: [8.5, 47.3, 300]})
+      });
+      harness.viewStateChanges.length = 0;
+      try {
+        const before = harness.getAcceptedViewport();
+        clock.step();
+        const proposal = harness.viewStateChanges[0];
+        expect(proposal).toBeDefined();
+        for (let i = 0; i < 4; i++) clock.step();
+        expect(harness.viewStateChanges).toHaveLength(1);
+        expect(harness.getViewportProps().position).toEqual([120, -70, 90]);
+        expectSameCamera(before, harness.getAcceptedViewport());
+        if (feedback === 'manual') harness.applyLatestViewState();
+        harness.controller.handleEvent(makeGestureEvent('panstart') as any);
+        expectSameCamera(before, harness.getViewport());
+        if (feedback === 'manual')
+          expect(harness.getViewportProps().position).toEqual(proposal.position);
+        harness.controller.handleEvent(makeGestureEvent('panend') as any);
+        // An external replacement invalidates the old proposal and gets its own fresh solve.
+        harness.updateProps({longitude: 8.501, position: [40, 20, 80]});
+        const replacement = harness.getAcceptedViewport();
+        const count = harness.viewStateChanges.length;
+        clock.step();
+        if (feedback === 'none') expect(harness.viewStateChanges).toHaveLength(count + 1);
+        expectSameCamera(replacement, harness.getAcceptedViewport());
+      } finally {
+        harness.controller.finalize();
+      }
+      expect(clock.frames.size).toBe(0);
+    }
+  );
+
+  it('does not poison a warm Terrain cache with a sparse or nonfinite pick', () => {
+    const clock = mockTerrainFrames();
+    let coordinate: number[] = [8.5, 47.3, 300];
+    const harness = createControllerHarness({
+      ControllerClass: TerrainController,
+      pickPosition: () => ({coordinate})
+    });
+    try {
+      clock.step();
+      const before = harness.getAcceptedViewport();
+      for (const invalid of [[8.5, 47.3, NaN], new Array(3)]) {
+        coordinate = invalid;
+        clock.step();
+        harness.controller.handleEvent(makeGestureEvent('panstart') as any);
+        expectSameCamera(before, harness.getAcceptedViewport());
+        harness.controller.handleEvent(makeGestureEvent('panend') as any);
+      }
+    } finally {
+      harness.controller.finalize();
+    }
+  });
+
+  it('invalidates warm Terrain before constraints normalize an externally replaced camera', () => {
+    const clock = mockTerrainFrames();
+    const harness = createControllerHarness({
+      ControllerClass: TerrainController,
+      pickPosition: () => ({coordinate: [8.5, 47.3, 300]})
+    });
+    clock.step();
+    const replacement = {
+      position: [100, -40, 90],
+      maxBounds: [
+        [8.49, 47.29],
+        [8.51, 47.31]
+      ]
+    };
+    const control = createControllerHarness({
+      initialViewState: {...harness.getProps(), ...replacement}
+    });
+    try {
+      harness.updateProps(replacement);
+      expectSameCamera(control.getAcceptedViewport(), harness.getAcceptedViewport());
+    } finally {
+      harness.controller.finalize();
+      control.controller.finalize();
+    }
+  });
+
+  it('suspends Terrain sampling through smooth target frames and resumes from the accepted final frame', () => {
+    vi.useFakeTimers();
+    const clock = mockTerrainFrames();
+    let target!: MapInteractionTarget;
+    const picker = vi.fn(() => ({coordinate: [8.5, 47.3, 300]}));
+    const harness = createControllerHarness({
+      ControllerClass: TerrainController,
+      controllerOptions: {
+        _targetNavigation: true,
+        getInteractionTarget: () => target,
+        scrollZoom: {smooth: true}
+      },
+      pickPosition: picker
+    });
+    try {
+      clock.step();
+      target = harness.makeTarget(POINTER, 180);
+      harness.controller.handleEvent(makeWheelEvent(30) as any);
+      const start = harness.timeline.getTime();
+      for (const elapsed of [50, 125, 200]) {
+        harness.timeline.setTime(start + elapsed);
+        harness.controller.updateTransition();
+        const frame = harness.getAcceptedViewport();
+        clock.step();
+        expect(picker).toHaveBeenCalledTimes(1);
+        expectSameCamera(frame, harness.getAcceptedViewport());
+      }
+      vi.advanceTimersByTime(301);
+      harness.timeline.setTime(start + 301);
+      harness.controller.updateTransition();
+      expectTargetCleared(harness.getInteractionState());
+      const before = harness.getAcceptedViewport();
+      clock.step();
+      expect(picker).toHaveBeenCalledTimes(2);
+      expectSameCamera(before, harness.getAcceptedViewport());
+    } finally {
+      harness.controller.finalize();
+    }
+    expect(clock.frames.size).toBe(0);
+  });
+
+  it.each(['lens', 'dimensions', 'replacement'])(
+    'discards a pending Terrain proposal on %s change',
+    change => {
+      const clock = mockTerrainFrames();
+      const harness = createControllerHarness({
+        ControllerClass: TerrainController,
+        feedback: 'manual',
+        pickPosition: () => ({coordinate: [8.5, 47.3, 150]})
+      });
+      try {
+        clock.step();
+        if (change === 'lens') harness.replaceViewOptions({fovy: 50});
+        if (change === 'dimensions') harness.replaceViewOptions({width: 760, height: 560});
+        if (change === 'replacement') harness.updateProps({zoom: 12, position: [20, 30, 40]});
+        const before = harness.getAcceptedViewport();
+        const count = harness.viewStateChanges.length;
+        clock.step();
+        expect(harness.viewStateChanges).toHaveLength(count + 1);
+        harness.applyLatestViewState();
+        expectSameCamera(before, harness.getAcceptedViewport());
+      } finally {
+        harness.controller.finalize();
+      }
+    }
+  );
+
+  it.each([{orthographic: true}, {legacyMeterSizes: true}])(
+    'retains stock Terrain behavior for unsupported target projection %j',
+    viewOptions => {
+      const clock = mockTerrainFrames();
+      const provider = vi.fn(() => ({coordinate: [8.5, 47.3, 180], screenPosition: POINTER}));
+      const options = {
+        ControllerClass: TerrainController,
+        viewOptions,
+        pickPosition: () => ({coordinate: [8.5, 47.3, 150]})
+      };
+      const enabled = createControllerHarness({
+        ...options,
+        controllerOptions: {_targetNavigation: true, getInteractionTarget: provider}
+      });
+      const stock = createControllerHarness(options);
+      try {
+        clock.step();
+        clock.step();
+        runPan(enabled.controller);
+        runPan(stock.controller);
+        expect(getCanonicalCameraState(enabled)).toEqual(getCanonicalCameraState(stock));
+        expect(provider).not.toHaveBeenCalled();
+        expectTargetCleared(enabled.getInteractionState());
+      } finally {
+        enabled.controller.finalize();
+        stock.controller.finalize();
+      }
+      expect(clock.frames.size).toBe(0);
+    }
+  );
+
+  it('passes stock input deltas through before a warm Terrain handoff gets its next sample', () => {
+    const clock = mockTerrainFrames();
+    let target: MapInteractionTarget | null = null;
+    const harness = createControllerHarness({
+      ControllerClass: TerrainController,
+      controllerOptions: {_targetNavigation: true, getInteractionTarget: () => target},
+      pickPosition: () => ({coordinate: [8.5, 47.3, 300]})
+    });
+    try {
+      clock.step();
+      target = harness.makeTarget(POINTER, 180);
+      runTargetOrbit(harness.controller);
+      target = null;
+      const before = harness.getAcceptedViewport();
+      const control = createControllerHarness({
+        initialViewState: harness.getProps(),
+        controllerOptions: {getInteractionTarget: () => null}
+      });
+      try {
+        harness.controller.handleEvent(makeGestureEvent('panstart') as any);
+        expectSameCamera(before, harness.getAcceptedViewport());
+        harness.controller.handleEvent(makeGestureEvent('panend') as any);
+        runPan(harness.controller);
+        runPan(control.controller);
+        expectSameCamera(control.getAcceptedViewport(), harness.getAcceptedViewport());
+        const after = harness.getAcceptedViewport();
+        clock.step();
+        expectSameCamera(after, harness.getAcceptedViewport());
+      } finally {
+        control.controller.finalize();
+      }
+    } finally {
+      harness.controller.finalize();
+    }
   });
 
   it('gives active target navigation precedence over terrain picking and rebasing, then resumes', () => {

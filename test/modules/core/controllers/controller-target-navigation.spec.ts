@@ -16,6 +16,10 @@ import type {
   InteractionTargetSession,
   InteractionTargetState
 } from '@deck.gl/core/controllers/interaction-target';
+import {
+  copyInteractionTarget,
+  freezeInteractionTarget
+} from '@deck.gl/core/controllers/interaction-target';
 import TargetNavigationInterpolator from '@deck.gl/core/transitions/target-navigation-interpolator';
 import {Timeline} from '@luma.gl/engine';
 
@@ -251,6 +255,59 @@ describe('Controller shared target lifecycle', () => {
     const fixture = harness({}, InvalidResolverController);
     fixture.controller.handleEvent(event('panstart'));
     expect(fixture.interaction.interactionTargetPosition).toBeUndefined();
+  });
+
+  it('enforces numeric validation after the state normalizes a resolver result', () => {
+    class InvalidNormalizerState extends CartesianState {
+      validateInteractionTarget(): InteractionTarget {
+        return {coordinate: [1, 2, Infinity], screenPosition: [100, 100]};
+      }
+    }
+    class InvalidNormalizerController extends CartesianController {
+      ControllerState = InvalidNormalizerState;
+    }
+    const fixture = harness({}, InvalidNormalizerController);
+    fixture.controller.handleEvent(event('panstart'));
+    expect(fixture.provider).toHaveBeenCalledTimes(1);
+    expect(fixture.interaction.interactionTargetPosition).toBeUndefined();
+  });
+
+  it.each([
+    {coordinate: [1, 2]},
+    {coordinate: [1, 2, 3, 4]},
+    {coordinate: [NaN, 2, 3]},
+    {coordinate: new Array(3)},
+    {screenPosition: [Infinity, 2]},
+    {screenPosition: [1]},
+    {minimumTargetDistance: -1}
+  ])('rejects malformed numeric snapshots %j', invalid => {
+    const target = {
+      coordinate: [1, 2, 3],
+      screenPosition: [100, 100],
+      ...invalid
+    } as InteractionTarget;
+    expect(copyInteractionTarget(target)).toBeNull();
+    expect(freezeInteractionTarget(target)).toBeNull();
+  });
+
+  it('strips application data and freezes a copy without freezing caller arrays', () => {
+    const input: InteractionTarget & {feature: object} = {
+      coordinate: [1, 2, 3],
+      screenPosition: [100, 100],
+      minimumTargetDistance: 0,
+      feature: {id: 42}
+    };
+    const target = freezeInteractionTarget(input)!;
+    expect(Object.keys(target)).toEqual(['coordinate', 'screenPosition', 'minimumTargetDistance']);
+    expect(Object.isFrozen(target)).toBe(true);
+    expect(Object.isFrozen(target.coordinate)).toBe(true);
+    expect(Object.isFrozen(target.screenPosition)).toBe(true);
+    input.coordinate[0] = 99;
+    input.screenPosition[0] = 50;
+    expect(target.coordinate).toEqual([1, 2, 3]);
+    expect(target.screenPosition).toEqual([100, 100]);
+    expect(target.minimumTargetDistance).toBe(0);
+    expect(Object.isFrozen(input.coordinate)).toBe(false);
   });
 
   it('rejects built-in picks owned by a different view', () => {

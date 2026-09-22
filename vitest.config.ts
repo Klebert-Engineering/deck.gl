@@ -219,11 +219,9 @@ const projects = [
         server: serverConfig,
         test: {
           name: 'headless',
-          // Temporarily exclude the full interaction suite from required
-          // automated runs. These browser-input tests have become flaky across
-          // headless and render, so keep them in `browser` only for manual
-          // debugging until the shared interaction harness is reworked.
-          include: ['test/modules/**/*.spec.ts'],
+          // Keep legacy interaction fixtures excluded. This isolated, readiness-driven spec
+          // exercises target picking and native canvas input in required CI runs.
+          include: ['test/modules/**/*.spec.ts', 'test/interaction/target-navigation.spec.ts'],
           exclude: [...excludedTests, 'test/modules/**/*.node.spec.ts'],
           globals: false,
           testTimeout: 30000,

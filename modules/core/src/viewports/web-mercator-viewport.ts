@@ -706,6 +706,68 @@ export default class WebMercatorViewport extends Viewport {
     }
   }
 
+  /** @internal Change the elevation reference without moving the perspective camera. */
+  _getRebasedViewState(altitude: number): WebMercatorTargetViewState | null {
+    if (!this.supportsTargetNavigation || !Number.isFinite(altitude)) return null;
+
+    const centerZ = altitude * this.distanceScales.unitsPerMeter[2];
+    const oldHeight = this.cameraPosition[2] - this.center[2];
+    const newHeight = this.cameraPosition[2] - centerZ;
+    const ratio = newHeight / oldHeight;
+    if (!Number.isFinite(ratio) || oldHeight <= 0 || ratio <= MINIMUM_TARGET_SCALE) return null;
+
+    // The camera-to-center vector scales with 2^-zoom. Move the reference along that vector,
+    // then normalize the complete center (including XYZ offsets and the new latitude's metric).
+    const center = this.center.map(
+      (value, i) =>
+        value +
+        (1 - ratio) * (this.cameraPosition[i] + (i === 0 ? 512 * this._worldOffset : 0) - value)
+    );
+    center[2] = centerZ;
+    return this._getTargetViewStateFromCenter(
+      center,
+      this.bearing,
+      this.pitch,
+      this.zoom - Math.log2(ratio)
+    );
+  }
+
+  /** @internal Validate a constrained elevation rebase in the source viewport's metric. */
+  _isSameCamera(viewport: WebMercatorViewport): boolean {
+    if (
+      !viewport.supportsTargetNavigation ||
+      viewport.width !== this.width ||
+      viewport.height !== this.height ||
+      viewport.fovy !== this.fovy ||
+      viewport.pitch !== this.pitch ||
+      Math.abs(Math.sin(((viewport.bearing - this.bearing) * Math.PI) / 360)) > 1e-10
+    )
+      return false;
+
+    const meters = this.distanceScales.metersPerUnit;
+    const distance = Math.hypot(
+      ...this.cameraPosition.map(
+        (value, i) => (value + (i === 0 ? 512 * this._worldOffset : 0) - this.center[i]) * meters[i]
+      )
+    );
+    const error = Math.hypot(
+      ...this.cameraPosition.map((value, i) => (viewport.cameraPosition[i] - value) * meters[i])
+    );
+    if (!(error <= Math.max(0.01, distance * 1e-7))) return false;
+
+    // Camera position alone does not check an asymmetric lens or invalid projection matrix.
+    return [
+      [0.3, 0.3],
+      [0.5, 0.5],
+      [0.7, 0.7]
+    ].every(([x, y]) => {
+      const pixel = [x * this.width, y * this.height];
+      const world = this.unproject(pixel, {targetZ: 0});
+      const projected = viewport.project(world);
+      return Math.hypot(projected[0] - pixel[0], projected[1] - pixel[1]) <= 0.1;
+    });
+  }
+
   /** Converts a common-space viewport center into the canonical public map-state fields. */
   private _getTargetViewStateFromCenter(
     center: number[],

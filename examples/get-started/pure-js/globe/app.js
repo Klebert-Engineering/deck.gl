@@ -26,30 +26,62 @@ const INITIAL_VIEW_STATE = {
 // Opt into the elevated-target demonstration with ?target-navigation.
 const targetNavigation = new URLSearchParams(window.location.search).has('target-navigation');
 const interactionCoordinate = [30, 20, 100000];
+const targetInitialState = {...INITIAL_VIEW_STATE, zoom: 4, pitch: 35};
+const controls = document.querySelector('#target-controls');
+const enabled = document.querySelector('#enabled');
+const acquisition = document.querySelector('#acquisition');
+const marker = document.querySelector('#target-marker');
+const status = document.querySelector('#status');
+controls.hidden = !targetNavigation;
+let target;
+let targetViewId;
+let revision = 0;
 
-new Deck({
-  views: new GlobeView({
+function createView() {
+  return new GlobeView({
+    id: `globe-${revision}`,
     controller: targetNavigation
       ? {
-          _targetNavigation: true,
+          _targetNavigation: enabled.checked,
           touchRotate: true,
           inertia: 300,
-          getInteractionTarget: ({viewport}) => {
-            const information = viewport.getTargetInfo(interactionCoordinate);
-            return information?.isVisible
-              ? {
-                  coordinate: [...interactionCoordinate],
-                  screenPosition: information.projectedPosition.slice(0, 2),
-                  minimumTargetDistance: 1000
+          ...(acquisition.value === 'pick'
+            ? {}
+            : {
+                getInteractionTarget: ({viewport}) => {
+                  const information = viewport.getTargetInfo(interactionCoordinate);
+                  return acquisition.value === 'provider' && information?.isVisible
+                    ? {
+                        coordinate: [...interactionCoordinate],
+                        screenPosition: information.projectedPosition.slice(0, 2)
+                      }
+                    : null;
                 }
-              : null;
-          }
+              })
         }
       : true
-  }),
-  initialViewState: targetNavigation
-    ? {...INITIAL_VIEW_STATE, zoom: 4, pitch: 35}
-    : INITIAL_VIEW_STATE,
+  });
+}
+
+const deck = new Deck({
+  views: createView(),
+  initialViewState: targetNavigation ? targetInitialState : INITIAL_VIEW_STATE,
+  onInteractionStateChange: state => {
+    target = state.interactionTargetPosition;
+    targetViewId = state.viewId;
+    status.textContent = target
+      ? `Target owned by ${targetViewId} · elevation ${target[2].toFixed(0)} m`
+      : 'No active target';
+  },
+  onAfterRender: () => {
+    const viewport = deck.getViewports().find(v => v.id === targetViewId);
+    marker.style.display = target && viewport ? 'block' : 'none';
+    if (target && viewport) {
+      const pixel = viewport.project(target);
+      marker.style.left = `${viewport.x + pixel[0]}px`;
+      marker.style.top = `${viewport.y + pixel[1]}px`;
+    }
+  },
   layers: [
     targetNavigation &&
       new ScatterplotLayer({
@@ -82,45 +114,60 @@ new Deck({
       getPolygon: d => d,
       stroked: false,
       filled: true,
-      getFillColor: [5, 10, 40]
+      getFillColor: [5, 10, 40],
+      pickable: targetNavigation ? '3d' : false
     }),
-    new GeoJsonLayer({
-      id: 'base-map',
-      data: COUNTRIES,
-      // Styles
-      stroked: true,
-      filled: true,
-      lineWidthMinPixels: 2,
-      getLineColor: [5, 10, 40],
-      getFillColor: [15, 40, 80]
-    }),
-    new GeoJsonLayer({
-      id: 'airports',
-      data: AIR_PORTS,
-      // Styles
-      filled: true,
-      pointRadiusMinPixels: 2,
-      pointRadiusScale: 2000,
-      getPointRadius: f => 11 - f.properties.scalerank,
-      getFillColor: [200, 0, 80, 180],
-      // Interactive props
-      pickable: true,
-      autoHighlight: true,
-      onClick: info =>
-        // eslint-disable-next-line
-        info.object && alert(`${info.object.properties.name} (${info.object.properties.abbrev})`)
-    }),
-    new ArcLayer({
-      id: 'arcs',
-      data: AIR_PORTS,
-      dataTransform: d => d.features.filter(f => f.properties.scalerank < 4),
-      // Styles
-      getSourcePosition: f => [-0.4531566, 51.4709959], // London
-      getTargetPosition: f => f.geometry.coordinates,
-      getSourceColor: [0, 128, 200],
-      getTargetColor: [200, 0, 80],
-      getWidth: 1,
-      parameters: {cullMode: 'none'}
-    })
+    !targetNavigation &&
+      new GeoJsonLayer({
+        id: 'base-map',
+        data: COUNTRIES,
+        // Styles
+        stroked: true,
+        filled: true,
+        lineWidthMinPixels: 2,
+        getLineColor: [5, 10, 40],
+        getFillColor: [15, 40, 80]
+      }),
+    !targetNavigation &&
+      new GeoJsonLayer({
+        id: 'airports',
+        data: AIR_PORTS,
+        // Styles
+        filled: true,
+        pointRadiusMinPixels: 2,
+        pointRadiusScale: 2000,
+        getPointRadius: f => 11 - f.properties.scalerank,
+        getFillColor: [200, 0, 80, 180],
+        // Interactive props
+        pickable: true,
+        autoHighlight: true,
+        onClick: info =>
+          // eslint-disable-next-line
+          info.object && alert(`${info.object.properties.name} (${info.object.properties.abbrev})`)
+      }),
+    !targetNavigation &&
+      new ArcLayer({
+        id: 'arcs',
+        data: AIR_PORTS,
+        dataTransform: d => d.features.filter(f => f.properties.scalerank < 4),
+        // Styles
+        getSourcePosition: f => [-0.4531566, 51.4709959], // London
+        getTargetPosition: f => f.geometry.coordinates,
+        getSourceColor: [0, 128, 200],
+        getTargetColor: [200, 0, 80],
+        getWidth: 1,
+        parameters: {cullMode: 'none'}
+      })
   ]
 });
+
+function reset() {
+  target = null;
+  marker.style.display = 'none';
+  status.textContent = 'No active target';
+  revision++;
+  deck.setProps({views: createView(), initialViewState: {...targetInitialState}});
+}
+enabled.addEventListener('change', reset);
+acquisition.addEventListener('change', reset);
+document.querySelector('#reset').addEventListener('click', reset);

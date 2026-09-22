@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <link rel="icon" href="data:,">
+  <title>deck.gl target navigation: Map and Terrain</title>
+  <style>
+    body {margin: 0; font: 14px system-ui; overflow: hidden;}
+    #controls {position: absolute; z-index: 1; top: 12px; left: 12px; padding: 12px; background: #ffffffe8; max-width: 340px;}
+    label {display: block; margin: 6px 0;}
+    #target-marker {display: none; position: absolute; z-index: 2; width: 14px; height: 14px; border: 2px solid white; border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none;}
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <strong>Elevated target navigation</strong>
+    <label>Controller <select id="camera"><option value="map">MapController</option><option value="terrain">TerrainController</option></select></label>
+    <label><input id="enabled" type="checkbox" checked> Enable experimental target navigation</label>
+    <label>Acquire <select id="acquisition"><option value="pick">Built-in 3D picking</option><option value="provider">Numeric provider (yellow object)</option><option value="null">Provider returns null (stock)</option></select></label>
+    <button id="reset">Reset camera</button>
+    <p>Drag to pan; right-drag to orbit; wheel/pinch to zoom. Try the yellow elevated surface, then the slope. Terrain follows the sampled center after target ownership ends.</p>
+    <output id="status">No active target</output>
+  </div>
+  <div id="target-marker"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

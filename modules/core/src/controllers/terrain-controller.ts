@@ -5,12 +5,44 @@
 import MapController from './map-controller';
 import {MapState, MapStateProps, type MapControllerOptions} from './map-controller';
 import type {ControllerProps, InteractionState} from './controller';
+import WebMercatorViewport from '../viewports/web-mercator-viewport';
+import {getInteractionTargetStructure} from './interaction-target';
+import {deepEqual} from '../utils/deep-equal';
+
+type TerrainRebase = {
+  source: Record<string, any>;
+  proposed: Record<string, any>;
+};
+
+function sameCameraState(a: Record<string, any>, b: Record<string, any>): boolean {
+  return ['longitude', 'latitude', 'zoom', 'bearing', 'pitch', 'position'].every(key =>
+    deepEqual(a[key], b[key], -1)
+  );
+}
+
+function getTerrainGeometry(props: Record<string, any>): Record<string, unknown> {
+  const {id, x, y, width, height, minZoom, maxZoom, minPitch, maxPitch, maxBounds} = props;
+  return {
+    id,
+    x,
+    y,
+    width,
+    height,
+    minZoom,
+    maxZoom,
+    minPitch,
+    maxPitch,
+    maxBounds,
+    ...getInteractionTargetStructure(props)
+  };
+}
 
 /**
  * Controller that extends MapController with terrain-aware behavior.
  * The camera smoothly follows terrain elevation during pan/zoom.
  */
 export default class TerrainController extends MapController {
+  protected declare props: ControllerProps & MapStateProps;
   /** Cached terrain altitude from depth picking at viewport center (smoothed) */
   private _terrainAltitude?: number = undefined;
   /** Raw (unsmoothed) terrain altitude from latest pick */
@@ -19,6 +51,10 @@ export default class TerrainController extends MapController {
   private _pickFrameId: number | null = null;
   /** Timestamp of last pick */
   private _lastPickTime: number = 0;
+  /** Cold initialization and post-target handoff use the same accepted-pose rebase. */
+  private _needsTerrainRebase = true;
+  /** A proposal is not terrain initialization until controlled state accepts it. */
+  private _terrainRebase: TerrainRebase | null = null;
 
   setProps(
     props: ControllerProps &
@@ -27,7 +63,30 @@ export default class TerrainController extends MapController {
         getAltitude?: (pos: [number, number]) => number | undefined;
       } & MapControllerOptions
   ) {
-    super.setProps({rotationPivot: '3d', ...props});
+    const oldGeometry = this.props && getTerrainGeometry(this.props);
+    const terrainProps = {rotationPivot: '3d' as const, ...props};
+    const geometry = getTerrainGeometry(terrainProps);
+    // Base normalization can emit synchronously. Suspend old altitude writes BEFORE it sees
+    // a replacement camera/configuration, not after the normalized camera has been published.
+    if (oldGeometry && !deepEqual(oldGeometry, geometry, -1)) {
+      this._needsTerrainRebase = true;
+      this._terrainRebase = null;
+    }
+    super.setProps(terrainProps);
+    const pending = this._terrainRebase;
+    if (pending) {
+      const accepted = new this.ControllerState({makeViewport: this.makeViewport, ...this.props});
+      const acceptedProps = accepted.getViewportProps();
+      if (sameCameraState(pending.proposed, acceptedProps)) {
+        // Keep the normalized offset. Its local metre scale may differ from the picked latitude.
+        this._terrainAltitude = acceptedProps.position![2];
+        this._terrainAltitudeTarget = this._terrainAltitude;
+        this._needsTerrainRebase = false;
+        this._terrainRebase = null;
+      } else if (!sameCameraState(pending.source, acceptedProps)) {
+        this._terrainRebase = null;
+      }
+    }
 
     // Periodically pick terrain altitude at the viewport center using rAF.
     // Keeps the altitude cache warm so interactions don't need expensive
@@ -41,37 +100,24 @@ export default class TerrainController extends MapController {
           !this.hasActiveInteractionTarget()
         ) {
           this._lastPickTime = now;
-          this._pickTerrainCenterAltitude();
-          // On first successful pick, rebase viewport to terrain altitude.
-          // Runs from rAF (outside React render) so onViewStateChange won't loop.
-          if (this._terrainAltitude === undefined && this._terrainAltitudeTarget !== undefined) {
-            this._terrainAltitude = this._terrainAltitudeTarget;
-            const controllerState = new this.ControllerState({
-              makeViewport: this.makeViewport,
-              ...this.props,
-              ...this.state
-            } as any);
-            const rebaseProps = this._rebaseViewport(this._terrainAltitudeTarget, controllerState);
-            if (rebaseProps) {
-              // Build a controllerState that includes the rebase adjustments so
-              // internal state matches the rebased viewState after React round-trip.
-              const rebasedState = new this.ControllerState({
-                makeViewport: this.makeViewport,
-                ...this.props,
-                ...this.state,
-                ...rebaseProps
-              } as any);
-              super.updateViewport(rebasedState);
+          // Do not repeatedly emit a proposal which a controlled application has not accepted.
+          if (!this._terrainRebase) {
+            const coordinate = this._pickTerrainCenter();
+            if (coordinate) {
+              if (this._needsTerrainRebase) this._resumeTerrain(coordinate);
+              else this._terrainAltitudeTarget = coordinate[2];
             }
           }
         }
-        this._pickFrameId = requestAnimationFrame(loop);
+        if (this._pickFrameId !== null) this._pickFrameId = requestAnimationFrame(loop);
       };
       this._pickFrameId = requestAnimationFrame(loop);
     }
   }
 
   finalize() {
+    this._terrainRebase = null;
+    this._needsTerrainRebase = true;
     if (this._pickFrameId !== null) {
       cancelAnimationFrame(this._pickFrameId);
       this._pickFrameId = null;
@@ -84,8 +130,12 @@ export default class TerrainController extends MapController {
     extraProps: Record<string, any> | null = null,
     interactionState: InteractionState = {}
   ): void {
-    // Not initialized yet — pass through to MapController
-    if (this._terrainAltitude === undefined || this.hasActiveInteractionTarget()) {
+    if (this.hasActiveInteractionTarget()) {
+      this._needsTerrainRebase = true;
+      this._terrainRebase = null;
+    }
+    // Pass stock deltas through while waiting; never overwrite the target's offset with a cache.
+    if (this._needsTerrainRebase || this._terrainAltitude === undefined) {
       super.updateViewport(newControllerState, extraProps, interactionState);
       return;
     }
@@ -104,15 +154,55 @@ export default class TerrainController extends MapController {
     super.updateViewport(newControllerState, extraProps, interactionState);
   }
 
-  private _pickTerrainCenterAltitude(): void {
-    if (!this.pickPosition) {
-      return;
-    }
+  private _pickTerrainCenter(): [number, number, number] | null {
+    if (!this.pickPosition) return null;
     const {x, y, width, height} = this.props;
     const pickResult = this.pickPosition(x + width / 2, y + height / 2);
-    if (pickResult?.coordinate && pickResult.coordinate.length >= 3) {
-      this._terrainAltitudeTarget = pickResult.coordinate[2];
+    const coordinate = pickResult?.coordinate;
+    const viewport = this.makeViewport(this.props);
+    if (
+      !coordinate ||
+      coordinate.length < 3 ||
+      ![...coordinate.slice(0, 3)].every(Number.isFinite) ||
+      (pickResult.viewport &&
+        (pickResult.viewport.id !== viewport.id ||
+          pickResult.viewport.constructor !== viewport.constructor ||
+          !pickResult.viewport.equals(viewport)))
+    ) {
+      return null;
     }
+    return coordinate.slice(0, 3) as [number, number, number];
+  }
+
+  private _resumeTerrain(coordinate: [number, number, number]): void {
+    // Use the displayed state, not a cached controller proposal or a transition endpoint.
+    const source = new this.ControllerState({makeViewport: this.makeViewport, ...this.props});
+    const sourceProps = source.getViewportProps();
+    const viewport = this.makeViewport(sourceProps);
+    const exact = viewport instanceof WebMercatorViewport && viewport.supportsTargetNavigation;
+    const rebase = exact
+      ? viewport._getRebasedViewState(coordinate[2])
+      : this._rebaseViewport(coordinate[2], source);
+    if (!rebase) return;
+    const candidate = new this.ControllerState({
+      makeViewport: this.makeViewport,
+      ...this.props,
+      ...rebase
+    });
+    const proposed = candidate.getViewportProps();
+    if (exact) {
+      const nextViewport = this.makeViewport(proposed) as WebMercatorViewport;
+      if (
+        !viewport.getTargetInfo(coordinate)?.isValid ||
+        !nextViewport.getTargetInfo(coordinate)?.isValid ||
+        !viewport._isSameCamera(nextViewport)
+      )
+        return;
+    }
+    this._terrainRebase = {source: sourceProps, proposed};
+    // rAF is the sole proposal point, outside rendering and public interaction-state callbacks.
+    super.updateViewport(candidate);
+    this._controllerState = undefined;
   }
 
   /**

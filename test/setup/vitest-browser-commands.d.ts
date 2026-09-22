@@ -31,7 +31,10 @@ interface DiffResult {
 }
 
 interface InputEvent {
-  type: 'click' | 'dblclick' | 'drag' | 'mousemove' | 'keypress';
+  type: 'click' | 'dblclick' | 'drag' | 'mousemove' | 'keypress' | 'wheel';
+  button?: 'left' | 'middle' | 'right';
+  deltaX?: number;
+  deltaY?: number;
   x?: number;
   y?: number;
   startX?: number;

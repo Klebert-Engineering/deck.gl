@@ -6,7 +6,11 @@ import LinearInterpolator from './linear-interpolator';
 import assert from '../utils/assert';
 import {lerp} from '@math.gl/core';
 
-import type {InteractionTarget} from '../controllers/interaction-target';
+import {
+  freezeInteractionTarget,
+  type InteractionTarget,
+  type FrozenInteractionTarget
+} from '../controllers/interaction-target';
 
 type TransitionProps =
   | string[]
@@ -15,12 +19,6 @@ type TransitionProps =
       extract?: string[];
       required?: string[];
     };
-
-type FrozenInteractionTarget = {
-  readonly coordinate: readonly [number, number, number];
-  readonly screenPosition: readonly [number, number];
-  readonly minimumTargetDistance?: number;
-};
 
 /** Camera-neutral metadata retained for one target-aware transition. */
 export type TargetNavigationTransitionContext = {
@@ -105,16 +103,10 @@ export default class TargetNavigationInterpolator extends LinearInterpolator {
   constructor(options: TargetNavigationInterpolatorOptions) {
     super({transitionProps: options.transitionProps});
 
-    assert(isFiniteTuple(options.target.coordinate, 3), 'target coordinate must be finite');
+    const target = freezeInteractionTarget(options.target);
     assert(
-      isFiniteTuple(options.target.screenPosition, 2),
-      'target screen position must be finite'
-    );
-    assert(
-      options.target.minimumTargetDistance === undefined ||
-        (Number.isFinite(options.target.minimumTargetDistance) &&
-          options.target.minimumTargetDistance >= 0),
-      'minimum target distance must be non-negative and finite'
+      target,
+      'target coordinate and pixel must be finite; minimum target distance must be non-negative and finite'
     );
     assert(
       !options.endScreenPosition || isFiniteTuple(options.endScreenPosition, 2),
@@ -122,20 +114,7 @@ export default class TargetNavigationInterpolator extends LinearInterpolator {
     );
     assert(typeof options.resolveFrame === 'function', 'resolveFrame must be a function');
 
-    this.target = Object.freeze({
-      coordinate: Object.freeze([...options.target.coordinate]) as readonly [
-        number,
-        number,
-        number
-      ],
-      screenPosition: Object.freeze([...options.target.screenPosition]) as readonly [
-        number,
-        number
-      ],
-      ...(options.target.minimumTargetDistance === undefined
-        ? {}
-        : {minimumTargetDistance: options.target.minimumTargetDistance})
-    });
+    this.target = target;
     this.endScreenPosition = Object.freeze([
       ...(options.endScreenPosition || options.target.screenPosition)
     ]) as readonly [number, number];

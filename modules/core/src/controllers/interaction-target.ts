@@ -64,16 +64,23 @@ export type InteractionTargetState = {
   targetNavigationOperation?: InteractionTargetOperation;
 };
 
+/** @internal Deeply readonly transition/session snapshot; never an application-owned object. */
+export type FrozenInteractionTarget = {
+  readonly coordinate: readonly [number, number, number];
+  readonly screenPosition: readonly [number, number];
+  readonly minimumTargetDistance?: number;
+};
+
 /** Copies only finite numeric target fields, excluding application objects and metadata. */
 export function copyInteractionTarget(target: InteractionTarget | null): InteractionTarget | null {
   if (
     !target ||
     !Array.isArray(target.coordinate) ||
     target.coordinate.length !== 3 ||
-    !target.coordinate.every(Number.isFinite) ||
+    ![...target.coordinate].every(Number.isFinite) ||
     !Array.isArray(target.screenPosition) ||
     target.screenPosition.length !== 2 ||
-    !target.screenPosition.every(Number.isFinite) ||
+    ![...target.screenPosition].every(Number.isFinite) ||
     (target.minimumTargetDistance !== undefined &&
       (!Number.isFinite(target.minimumTargetDistance) || target.minimumTargetDistance < 0))
   ) {
@@ -86,6 +93,17 @@ export function copyInteractionTarget(target: InteractionTarget | null): Interac
       ? {}
       : {minimumTargetDistance: target.minimumTargetDistance})
   };
+}
+
+/** @internal Validate, strip semantic fields and freeze a defensive numeric snapshot. */
+export function freezeInteractionTarget(
+  target: InteractionTarget | null
+): Readonly<InteractionTarget> | null {
+  const copy = copyInteractionTarget(target);
+  if (!copy) return null;
+  Object.freeze(copy.coordinate);
+  Object.freeze(copy.screenPosition);
+  return Object.freeze(copy);
 }
 
 /** Captures only hard view configuration, never a camera pose or derived clip matrix. */

@@ -25,14 +25,16 @@ import type {
   InteractionTargetSource,
   GetInteractionTarget,
   TargetNavigationOptions,
-  InteractionTargetSession
+  InteractionTargetSession,
+  InteractionTargetState
 } from './interaction-target';
+import {copyInteractionTarget, freezeInteractionTarget} from './interaction-target';
+import type {TargetInfo} from '../viewports/target-navigation';
 
 import LinearInterpolator from '../transitions/linear-interpolator';
 import TargetNavigationInterpolator from '../transitions/target-navigation-interpolator';
 import type Viewport from '../viewports/viewport';
 import WebMercatorViewport, {
-  type WebMercatorTargetInfo,
   type WebMercatorTargetViewState
 } from '../viewports/web-mercator-viewport';
 
@@ -209,27 +211,20 @@ export type MapStateInternal = {
   startPitch?: number;
   /** Zoom when current zoom operation started */
   startZoom?: number;
-  /** Numeric target snapshot retained by the active target-navigation session. */
-  interactionTarget?: MapInteractionTarget;
   /** Canonical map state at target acquisition. */
   targetNavigationStartProps?: Required<MapStateProps>;
   /** Immutable perspective viewport at target acquisition. */
   targetNavigationStartViewport?: GeospatialTargetViewport;
   /** Immutable target metrics measured at acquisition. */
-  targetNavigationStartTargetInfo?: Readonly<WebMercatorTargetInfo>;
-  /** Controller-owned identity of the active target session. */
-  targetNavigationSessionId?: number;
-  /** Target's desired view-local screen position in the most recent accepted state. */
-  targetNavigationScreenPosition?: [number, number];
+  targetNavigationStartTargetInfo?: Readonly<TargetInfo>;
   /** Raw pointer/touch origin, or first recognized trackpad sample, for absolute pan deltas. */
   targetNavigationInputOrigin?: [number, number];
   /** Constraint callback frozen for the active target session. */
   targetNavigationConstraint?: ConstrainMapInteractionTargetViewState;
   /** View and input identity frozen for the active target session. */
   targetNavigationViewId?: string;
-  targetNavigationOperation?: MapInteractionTargetOperation;
   targetNavigationSource?: MapInteractionTargetSource;
-};
+} & InteractionTargetState;
 
 /* Utils */
 
@@ -384,20 +379,8 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
   /** Validates the target after any application or subclass resolver has returned. */
   validateInteractionTarget(target: MapInteractionTarget | null): MapInteractionTarget | null {
     const viewport = this.getTargetNavigationViewport();
-    if (!viewport) return null;
-    if (
-      !target ||
-      !Array.isArray(target.coordinate) ||
-      target.coordinate.length !== 3 ||
-      !target.coordinate.every(Number.isFinite) ||
-      !Array.isArray(target.screenPosition) ||
-      target.screenPosition.length !== 2 ||
-      !target.screenPosition.every(Number.isFinite) ||
-      (target.minimumTargetDistance !== undefined &&
-        (!Number.isFinite(target.minimumTargetDistance) || target.minimumTargetDistance < 0))
-    ) {
-      return null;
-    }
+    target = copyInteractionTarget(target);
+    if (!viewport || !target) return null;
     const targetInfo = viewport.getTargetInfo(target.coordinate);
     if (
       !targetInfo?.isVisible ||
@@ -472,15 +455,9 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
       constrainViewState?: ConstrainMapInteractionTargetViewState;
     }
   ): MapState {
-    const coordinate = Object.freeze([...target.coordinate]) as unknown as [number, number, number];
-    const screenPosition = Object.freeze([...target.screenPosition]) as unknown as [number, number];
-    const interactionTarget = Object.freeze({
-      coordinate,
-      screenPosition,
-      ...(target.minimumTargetDistance === undefined
-        ? {}
-        : {minimumTargetDistance: target.minimumTargetDistance})
-    }) as MapInteractionTarget;
+    const interactionTarget = freezeInteractionTarget(target);
+    if (!interactionTarget) return this.withoutInteractionTarget();
+    const {coordinate, screenPosition} = interactionTarget;
     const targetNavigationStartViewport = this._getTargetViewport() || undefined;
     const startTargetInfo = targetNavigationStartViewport?.getTargetInfo(coordinate);
     const targetNavigationStartTargetInfo = startTargetInfo
@@ -1203,13 +1180,8 @@ export class MapState extends ViewState<MapState, MapStateProps, MapStateInterna
     if (!(sourceViewport instanceof WebMercatorViewport)) {
       return null;
     }
-    const candidateTarget = Object.freeze({
-      coordinate: interactionTarget.coordinate,
-      screenPosition: Object.freeze([...screenPosition]) as [number, number],
-      ...(interactionTarget.minimumTargetDistance === undefined
-        ? {}
-        : {minimumTargetDistance: interactionTarget.minimumTargetDistance})
-    }) as Readonly<MapInteractionTarget>;
+    const candidateTarget = freezeInteractionTarget({...interactionTarget, screenPosition});
+    if (!candidateTarget) return null;
     const applicationViewState = state.targetNavigationConstraint(
       Object.freeze({
         viewId: state.targetNavigationViewId || '',

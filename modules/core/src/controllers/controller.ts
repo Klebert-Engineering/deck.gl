@@ -13,6 +13,7 @@ import {worldToPixels} from '@math.gl/web-mercator';
 import TargetNavigationInterpolator from '../transitions/target-navigation-interpolator';
 import {
   copyInteractionTarget,
+  freezeInteractionTarget,
   getInteractionTargetStructure,
   type InteractionTarget,
   type InteractionTargetOperation,
@@ -201,6 +202,7 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
 
   protected _controllerState?: ControllerState;
   private _events: Record<string, boolean> = {};
+  private _isFinalizing = false;
   private _interactionState: InteractionState = {
     isDragging: false
   };
@@ -281,6 +283,7 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
   }
 
   finalize() {
+    this._isFinalizing = true;
     this._releaseAllTargets(true);
     if (this._eventStartBlocked !== null) {
       clearTimeout(this._eventStartBlocked);
@@ -1513,7 +1516,7 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
       const resolved = copyInteractionTarget(
         this.resolveInteractionTarget(screenPosition, operation, source)
       );
-      const target = copyInteractionTarget(
+      const target = freezeInteractionTarget(
         resolved && this.controllerState.validateInteractionTarget(resolved)
       );
       if (
@@ -1523,9 +1526,6 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
       ) {
         return null;
       }
-      Object.freeze(target.coordinate);
-      Object.freeze(target.screenPosition);
-      Object.freeze(target);
       this._activeTarget = target;
       this._targetSessionGeneration++;
       this._activeTargetViewStructure = getInteractionTargetStructure(this.props);
@@ -1608,9 +1608,16 @@ export default abstract class Controller<ControllerState extends IViewState<Cont
     this._activeTargetViewStructure = null;
     this._activeTargetViewportType = null;
     this._targetSessionGeneration++;
-    const state = this.controllerState.withoutInteractionTarget!();
-    this.state = state.getState();
-    this._controllerState = state;
+    if (this._isFinalizing) {
+      // ViewManager may already have removed the owning view. Disposal must not call its
+      // makeViewport callback or reconstruct a constrained camera that will never be used.
+      this.state = {};
+      this._controllerState = undefined;
+    } else {
+      const state = this.controllerState.withoutInteractionTarget!();
+      this.state = state.getState();
+      this._controllerState = state;
+    }
     this._setInteractionState({
       interactionTargetPosition: undefined,
       rotationPivotPosition: undefined,

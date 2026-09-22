@@ -60,6 +60,12 @@ specializes `TargetNavigationOptions<WebMercatorViewport>`. The `MapInteractionT
 `GetMapInteractionTarget` exports remain compatible aliases; new code may use
 `InteractionTarget` and `InteractionTargetContext<WebMercatorViewport>`.
 
+For a runnable offline comparison, see the
+[Map/Terrain example](https://github.com/visgl/deck.gl/tree/master/examples/get-started/pure-js/target-navigation)
+and its [local-fork run instructions](./terrain-controller.md#runnable-example).
+[TerrainController](./terrain-controller.md#experimental-target-navigation) suspends elevation
+following throughout target ownership and validates a pose-preserving handoff before resuming it.
+
 The camera invariant depends on the operation:
 
 | Operation | Target-relative behavior |

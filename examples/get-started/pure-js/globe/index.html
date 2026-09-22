@@ -2,12 +2,25 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <link rel="icon" href="data:,">
   <title>deck.gl Example</title>
   <style>
     body {margin: 0; width: 100vw; height: 100vh; overflow: hidden;}
+    #target-controls {position: absolute; z-index: 1; left: 12px; top: 12px; padding: 12px; background: #ffffffe8; font: 14px system-ui; max-width: 330px;}
+    label {display: block; margin: 6px 0;}
+    #target-marker {display: none; position: absolute; z-index: 2; width: 14px; height: 14px; border: 2px solid white; border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none;}
   </style>
 </head>
 <body>
+  <div id="target-controls" hidden>
+    <strong>Spherical target navigation</strong>
+    <label><input id="enabled" type="checkbox" checked> Enable experimental navigation</label>
+    <label>Acquire <select id="acquisition"><option value="pick">Built-in 3D picking</option><option value="provider">Numeric provider (yellow point)</option><option value="null">Provider returns null (stock)</option></select></label>
+    <button id="reset">Reset camera</button>
+    <p>Yellow surface: 100 km above the globe. Drag to pan, right-drag to orbit, wheel/pinch to approach. No remote data in this mode.</p>
+    <output id="status">No active target</output>
+  </div>
+  <div id="target-marker"></div>
 </body>
 <script type="module" src="app.js"></script>
 </html>

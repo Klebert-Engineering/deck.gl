@@ -103,7 +103,13 @@ FirstPerson dolly, picked Orbit pivots, orthographic target navigation, and asyn
 remain follow-up work; they are not enabled by this option.
 
 The [pure JavaScript Globe example](https://github.com/visgl/deck.gl/tree/master/examples/get-started/pure-js/globe)
-includes an elevated-target demo enabled by the `?target-navigation` query parameter.
+includes an offline elevated-target demo enabled by the `?target-navigation` query parameter.
+It offers built-in picking, numeric provider/null, enable/reset and public-state target indication.
+Build this checkout with `corepack yarn build`, then run `npm install` and `npm run start-local`
+in `examples/get-started/pure-js/globe`. A local-fork production check is
+`npm run build -- --config ../../../vite.config.local.mjs` in that directory. Ordinary stable
+npm dependencies do not yet expose this experimental API. The normal non-target example retains
+its remote datasets; target mode does not request them.
 
 ## Custom GlobeController
 

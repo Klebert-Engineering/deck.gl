@@ -43,6 +43,17 @@ gesture/animation lifetime, cancellation, and public interaction state. Each con
 viewport owns its camera transform and validation. Enabling the option does not enable target
 navigation in FirstPerson, Orbit, Orthographic, or an unsupported custom controller.
 
+`TerrainController` composes this lifecycle with its existing terrain sampling; see
+[Terrain handoff](./terrain-controller.md#experimental-target-navigation) for the accepted-pose
+and controlled-feedback guarantees. The offline
+[Map/Terrain example](https://github.com/visgl/deck.gl/tree/master/examples/get-started/pure-js/target-navigation)
+and [Globe target mode](https://github.com/visgl/deck.gl/tree/master/examples/get-started/pure-js/globe)
+demonstrate both built-in 3D picking and synchronous providers. Build the repository with
+`corepack yarn build`, run `npm install` and `npm run start-local` in the respective example
+directory; add `?target-navigation` for Globe. For a fork production bundle run
+`npm run build -- --config ../../../vite.config.local.mjs` there. Stable npm example builds
+do not validate this experimental API.
+
 ### Numeric contract
 
 The root exports of `@deck.gl/core` and `deck.gl` include `InteractionTarget`,

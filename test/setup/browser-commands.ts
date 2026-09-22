@@ -334,9 +334,9 @@ export const emulateInput: BrowserCommand<[event: InputEvent]> = async (ctx, eve
     }
 
     case 'drag': {
-      const {startX, startY, endX, endY, steps = 5, shiftKey} = event;
+      const {startX, startY, endX, endY, steps = 5, shiftKey, button = 'left'} = event;
       await frame.evaluate(
-        ({startX, startY, endX, endY, steps, shiftKey}) => {
+        ({startX, startY, endX, endY, steps, shiftKey, button}) => {
           const canvas = Array.from(document.querySelectorAll('canvas'))
             .reverse()
             .find(element => {
@@ -357,8 +357,9 @@ export const emulateInput: BrowserCommand<[event: InputEvent]> = async (ctx, eve
                 pointerId: 1,
                 pointerType: 'mouse',
                 isPrimary: true,
-                button: 0,
-                buttons: type === 'pointerup' ? 0 : 1,
+                button: button === 'right' ? 2 : button === 'middle' ? 1 : 0,
+                buttons:
+                  type === 'pointerup' ? 0 : button === 'right' ? 2 : button === 'middle' ? 4 : 1,
                 shiftKey
               })
             );
@@ -372,7 +373,35 @@ export const emulateInput: BrowserCommand<[event: InputEvent]> = async (ctx, eve
           }
           dispatchPointerEvent('pointerup', endX, endY);
         },
-        {startX, startY, endX, endY, steps, shiftKey: shiftKey || false}
+        {startX, startY, endX, endY, steps, shiftKey: shiftKey || false, button}
+      );
+      break;
+    }
+
+    case 'wheel': {
+      // Like drag, dispatch inside the test iframe: the runner UI may cover page-mouse input.
+      // Coordinates remain frame-local CSS pixels, as for pointer events above.
+      await frame.evaluate(
+        ({x, y, deltaX, deltaY}) => {
+          const canvas = Array.from(document.querySelectorAll('canvas'))
+            .reverse()
+            .find(element => {
+              const rect = element.getBoundingClientRect();
+              return rect.width > 0 && rect.height > 0;
+            });
+          canvas?.dispatchEvent(
+            new WheelEvent('wheel', {
+              clientX: x,
+              clientY: y,
+              deltaX,
+              deltaY,
+              deltaMode: 0,
+              bubbles: true,
+              cancelable: true
+            })
+          );
+        },
+        {x: event.x, y: event.y, deltaX: event.deltaX ?? 0, deltaY: event.deltaY ?? 0}
       );
       break;
     }
