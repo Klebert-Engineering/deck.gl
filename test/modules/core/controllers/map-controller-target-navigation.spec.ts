@@ -2111,6 +2111,11 @@ describe('MapController target navigation', () => {
       title: 'a malformed position',
       constrain: (context: Readonly<MapInteractionTargetViewStateContext>) =>
         ({...context.requestedViewState, position: [0, 0]}) as any
+    },
+    {
+      title: 'a sparse position',
+      constrain: (context: Readonly<MapInteractionTargetViewStateContext>) =>
+        ({...context.requestedViewState, position: new Array(3)}) as any
     }
   ])('keeps the last valid state when the application constraint returns $title', ({constrain}) => {
     let target!: MapInteractionTarget;

@@ -87,7 +87,9 @@ The provider receives `{viewId, operation, source, screenPosition, viewport}`:
 The provider must synchronously return a fresh numeric target or `null`. A configured provider
 is authoritative: `null` selects stock navigation without falling through to picking. With no
 provider, Controller attempts one synchronous 3D pick and rejects results owned by another view
-or projection. This is not deep picking. The built-in path is unavailable in async/WebGPU picking
+or projection. It explicitly requests depth unprojection of pickable geometry; `pickable: true`
+is sufficient (`pickable: '3d'` also works). This is not deep picking.
+The built-in path is unavailable in async/WebGPU picking
 mode; a fresh synchronous provider can still work there. Promises, stale feature objects, and
 asynchronous target acquisition are not supported.
 
@@ -105,6 +107,15 @@ also reports the same coordinate as `rotationPivotPosition` for compatibility. B
 completion/cancellation, controller replacement/finalization, structural invalidation, or errors.
 Ordinary controlled camera feedback retains the snapshot; changed view dimensions, canvas,
 projection family, or lens configuration cancels it. This is not scene collision detection.
+
+Built-in acquisition uses the originating view's presentation canvas and canvas-local CSS
+coordinates. When pick viewport metadata is present, its view ID and viewport type must match;
+the concrete state then validates the coordinate in the current viewport. This is not a rendering
+`Viewport.equals` check: rendered world copies and reconstructed controller viewports can differ.
+Protected pickers without viewport metadata remain supported. Terrain's separate elevation
+tracking also checks rendering equality to reject stale samples before rebasing its camera.
+Moving a view to another canvas or replacing its event manager disposes the old controller,
+including target timers and transitions; the replacement acquires a fresh target.
 
 An unsupported operation or invalid acquisition takes the complete stock path without provider
 calls for unsupported cameras. An invalid candidate during a supported session holds the last
@@ -185,7 +196,7 @@ If `event` is provided, returns `false` if the event is already handled, and mar
 
 Returns `true` if the user is dragging the view.
 
-#### `resolveInteractionTarget(screenPosition, operation, source)`
+#### `resolveInteractionTarget(screenPosition, operation, source)` {#resolveinteractiontarget}
 
 Protected synchronous target resolver used by participating states. The default implementation
 uses the provider, otherwise the controller picker. Overrides must return a numeric

@@ -3,6 +3,7 @@
 // Copyright (c) vis.gl contributors
 
 import type Viewport from '../viewports/viewport';
+import isFiniteTuple from '../utils/is-finite-tuple';
 
 /** A numeric coordinate in the owning viewport's world space and its projected CSS pixel. */
 export type InteractionTarget = {
@@ -75,12 +76,8 @@ export type FrozenInteractionTarget = {
 export function copyInteractionTarget(target: InteractionTarget | null): InteractionTarget | null {
   if (
     !target ||
-    !Array.isArray(target.coordinate) ||
-    target.coordinate.length !== 3 ||
-    ![...target.coordinate].every(Number.isFinite) ||
-    !Array.isArray(target.screenPosition) ||
-    target.screenPosition.length !== 2 ||
-    ![...target.screenPosition].every(Number.isFinite) ||
+    !isFiniteTuple(target.coordinate, 3) ||
+    !isFiniteTuple(target.screenPosition, 2) ||
     (target.minimumTargetDistance !== undefined &&
       (!Number.isFinite(target.minimumTargetDistance) || target.minimumTargetDistance < 0))
   ) {

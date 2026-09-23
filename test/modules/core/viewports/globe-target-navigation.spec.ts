@@ -131,4 +131,25 @@ describe('GlobeViewport target navigation', () => {
       ).toBeNull();
     }
   });
+
+  it.each([new Array(3), Object.assign(new Array(3), {0: 0, 1: 0})])(
+    'rejects sparse target coordinates %j before projection',
+    coordinate => {
+      const viewport = new GlobeViewport({width: 800, height: 600, zoom: 3});
+      expect(viewport.getTargetInfo(coordinate as [number, number, number])).toBeNull();
+    }
+  );
+
+  it.each([new Array(2), Object.assign(new Array(2), {0: 400})])(
+    'rejects sparse target pixels %j for both orbit and pan',
+    pixel => {
+      const viewport = new GlobeViewport({width: 800, height: 600, zoom: 3});
+      const options = {
+        target: [0, 0, 100] as [number, number, number],
+        screenPosition: pixel as [number, number]
+      };
+      expect(viewport.getTargetViewState(options)).toBeNull();
+      expect(viewport.getTargetPanViewState(options)).toBeNull();
+    }
+  );
 });

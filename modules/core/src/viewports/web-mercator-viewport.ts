@@ -20,6 +20,7 @@ import {
 import {Padding} from './viewport';
 
 import {Matrix4, clamp, vec2} from '@math.gl/core';
+import {getProjectionParameters as getProjectionMatrixParameters} from '../utils/math-utils';
 
 export type WebMercatorViewportOptions = {
   /** Name of the viewport */
@@ -528,10 +529,7 @@ export default class WebMercatorViewport extends Viewport {
         this.viewMatrix[10] * commonPosition[2] +
         this.viewMatrix[14];
       const cameraDepth = -viewZ;
-      const projection22 = this.projectionMatrix[10];
-      const projection23 = this.projectionMatrix[14];
-      const near = projection23 / (projection22 - 1);
-      const far = projection23 / (projection22 + 1);
+      const {near, far} = getProjectionMatrixParameters(this.projectionMatrix);
       // Freeze one isotropic local metric at the target. Web Mercator's local common-space scale
       // is conformal, so all three axes use the target latitude's meter conversion.
       const metersPerUnit = 1 / unitsPerMeter(localizedTarget[1]);

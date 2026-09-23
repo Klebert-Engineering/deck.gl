@@ -16,6 +16,7 @@ import ViewState, {
 import {applyRubberBand, getMaxBoundsExtents, getMaxBoundsRect} from './utils';
 import {worldToLngLat, lngLatToWorld as _lngLatToWorld} from '@math.gl/web-mercator';
 import assert from '../utils/assert';
+import isFiniteTuple from '../utils/is-finite-tuple';
 import {mod} from '../utils/math-utils';
 import type GlobeViewport from '../viewports/globe-viewport';
 import type {
@@ -130,9 +131,7 @@ function copyTargetViewState(value: WebMercatorTargetViewState): WebMercatorTarg
     !Number.isFinite(value.zoom) ||
     !Number.isFinite(value.bearing) ||
     !Number.isFinite(value.pitch) ||
-    !Array.isArray(value.position) ||
-    value.position.length !== 3 ||
-    !value.position.every(Number.isFinite)
+    !isFiniteTuple(value.position, 3)
   ) {
     return null;
   }

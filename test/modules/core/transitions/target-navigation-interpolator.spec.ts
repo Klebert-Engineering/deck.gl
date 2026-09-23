@@ -34,6 +34,7 @@ describe('TargetNavigationInterpolator', () => {
   it('carries a frozen numeric target and delegates the camera curve to the resolver', () => {
     const coordinate: [number, number, number] = [11.25, 47.75, 125];
     const screenPosition: [number, number] = [320, 240];
+    const endScreenPosition: [number, number] = [420, 340];
     const sourceTarget = {coordinate, screenPosition, featureId: 'application-only'};
     const contexts: TargetNavigationTransitionContext[] = [];
     const resolveFrame = vi.fn(
@@ -48,12 +49,13 @@ describe('TargetNavigationInterpolator', () => {
     const interpolator = new TargetNavigationInterpolator({
       target: sourceTarget,
       transitionProps: TRANSITION_PROPS,
-      endScreenPosition: [420, 340],
+      endScreenPosition,
       resolveFrame
     });
 
     coordinate[0] = 0;
     screenPosition[0] = 0;
+    endScreenPosition[0] = 0;
 
     const {start, end} = interpolator.initializeProps(START_PROPS, END_PROPS);
     expect(resolveFrame).not.toHaveBeenCalled();
@@ -123,6 +125,27 @@ describe('TargetNavigationInterpolator', () => {
     ]);
     expect(contexts.every(context => !('mode' in context))).toBe(true);
     expect(contexts.every(context => !('radius' in context))).toBe(true);
+  });
+
+  it.each([
+    {endScreenPosition: new Array(2)},
+    {endScreenPosition: Object.assign(new Array(2), {0: 320})},
+    {endScreenPosition: [320]},
+    {endScreenPosition: [320, 240, 0]},
+    {endScreenPosition: [NaN, 240]},
+    {endScreenPosition: [320, Infinity]}
+  ])('rejects malformed transition endpoints %j', ({endScreenPosition}) => {
+    const resolveFrame = vi.fn();
+    expect(
+      () =>
+        new TargetNavigationInterpolator({
+          target: {coordinate: [11.25, 47.75, 125], screenPosition: [320, 240]},
+          endScreenPosition: endScreenPosition as [number, number],
+          transitionProps: TRANSITION_PROPS,
+          resolveFrame
+        })
+    ).toThrow('end screen position must be finite');
+    expect(resolveFrame).not.toHaveBeenCalled();
   });
 
   it('passes the frozen distance policy to the model without requiring map fields', () => {

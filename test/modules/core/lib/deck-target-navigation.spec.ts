@@ -6,6 +6,71 @@ import {test, expect} from 'vitest';
 import {MapView, TerrainController} from '@deck.gl/core';
 import {createTargetScene, expectTargetPixel} from '../../../utils/target-navigation';
 
+test.each([1, 2])(
+  'Deck keeps rendered targets on their own canvas (pixel ratio %s)',
+  async useDevicePixels => {
+    const scene = await createTargetScene({multiCanvas: true, offset: 40, useDevicePixels});
+    try {
+      for (const [id, canvas, coordinate, layerId] of [
+        ['target', scene.canvas, scene.coordinate, 'elevated'],
+        ['second', scene.secondCanvas!, scene.secondCoordinate, 'second-elevated']
+      ] as const) {
+        const [x, y] = scene.pixel(id).map(Math.round);
+        const viewport = scene.viewport(id);
+        const picked = scene.deck.pickObject({x, y, canvasId: canvas.id, unproject3D: true});
+        expect(picked?.layer?.id).toBe(layerId);
+        expect(picked?.viewport?.id).toBe(id);
+        expect(Math.abs(picked!.coordinate![2] - coordinate[2])).toBeLessThanOrEqual(
+          2 * viewport.metersPerPixel
+        );
+        const controller = scene.deck.viewManager!.controllers[id]!;
+        controller.handleEvent({
+          type: 'panstart',
+          pointerType: 'mouse',
+          offsetCenter: {x, y},
+          srcEvent: {},
+          stopPropagation() {}
+        } as any);
+        expect(scene.states.at(-1)?.viewId).toBe(id);
+        expect(scene.states.at(-1)?.interactionTargetPosition).toEqual(picked!.coordinate);
+        expectTargetPixel(viewport, picked!.coordinate!, [x - viewport.x, y - viewport.y]);
+        controller.handleEvent({type: 'panend', offsetCenter: {x, y}, srcEvent: {}} as any);
+        expect(scene.states.at(-1)?.interactionTargetPosition).toBeUndefined();
+      }
+      expect(scene.errors).toEqual([]);
+    } finally {
+      scene.dispose();
+    }
+  }
+);
+
+test('Deck rejects a target picked through an overlapping view on the same canvas', async () => {
+  const scene = await createTargetScene({offset: 40});
+  try {
+    const view = scene.deck.viewManager!.getView('target')!;
+    scene.deck.setProps({views: [view, new MapView({...view.props, id: 'overlay'})]});
+    scene.deck.redraw(true);
+    const [x, y] = scene.pixel().map(Math.round);
+    const picked = scene.deck.pickObject({x, y, unproject3D: true});
+    expect(picked?.viewport?.id).toBe('overlay');
+    for (const id of ['target', 'overlay']) {
+      const controller = scene.deck.viewManager!.controllers[id]!;
+      controller.handleEvent({
+        type: 'panstart',
+        pointerType: 'mouse',
+        offsetCenter: {x, y},
+        srcEvent: {},
+        stopPropagation() {}
+      } as any);
+      expect(Boolean(scene.states.at(-1)?.interactionTargetPosition)).toBe(id === 'overlay');
+      controller.handleEvent({type: 'panend', offsetCenter: {x, y}, srcEvent: {}} as any);
+    }
+    expect(scene.errors).toEqual([]);
+  } finally {
+    scene.dispose();
+  }
+});
+
 test('Deck disposes an active Terrain target after its view has been removed', async () => {
   const scene = await createTargetScene({camera: 'terrain', acquisition: 'point'});
   try {

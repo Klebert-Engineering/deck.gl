@@ -4,6 +4,7 @@
 
 import LinearInterpolator from './linear-interpolator';
 import assert from '../utils/assert';
+import isFiniteTuple from '../utils/is-finite-tuple';
 import {lerp} from '@math.gl/core';
 
 import {
@@ -74,14 +75,6 @@ function freezeTransitionProps(
     }
   }
   return Object.freeze(result);
-}
-
-function isFiniteTuple(value: unknown, length: number): value is number[] {
-  return (
-    Array.isArray(value) &&
-    value.length === length &&
-    value.every(component => Number.isFinite(component))
-  );
 }
 
 /**

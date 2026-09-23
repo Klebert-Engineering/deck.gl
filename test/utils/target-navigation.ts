@@ -15,6 +15,7 @@ export async function createTargetScene({
   empty = false,
   useDevicePixels = 1,
   offset = 0,
+  multiCanvas = false,
   pickAsync = 'sync'
 }: {
   camera?: 'map' | 'globe' | 'terrain';
@@ -23,6 +24,7 @@ export async function createTargetScene({
   empty?: boolean;
   useDevicePixels?: number;
   offset?: number;
+  multiCanvas?: boolean;
   pickAsync?: 'sync' | 'async';
 } = {}) {
   const globe = camera === 'globe';
@@ -32,6 +34,14 @@ export async function createTargetScene({
   const canvas = document.createElement('canvas');
   canvas.style.cssText = `position:absolute;left:0;top:0;width:${width}px;height:${height}px`;
   document.body.appendChild(canvas);
+  canvas.id = 'target-canvas';
+  const secondCanvas = multiCanvas ? document.createElement('canvas') : null;
+  const secondCoordinate: [number, number, number] = [-74, 40.7, 500];
+  if (secondCanvas) {
+    secondCanvas.id = 'second-target-canvas';
+    secondCanvas.style.cssText = `position:absolute;left:${width}px;top:20px;width:${width}px;height:${height}px`;
+    document.body.appendChild(secondCanvas);
+  }
   const states: InteractionState[] = [];
   const frames: {viewport: WebMercatorViewport; interaction: InteractionState}[] = [];
   const errors: Error[] = [];
@@ -98,16 +108,37 @@ export async function createTargetScene({
           pickable: '3d'
         })
       ];
+  if (secondCanvas) {
+    layers.push(
+      new ScatterplotLayer({
+        id: 'second-elevated',
+        data: [secondCoordinate],
+        getPosition: d => d,
+        getRadius: 180,
+        getFillColor: [0, 180, 255],
+        // Controller acquisition explicitly requests depth even for ordinary pickable layers.
+        pickable: true
+      })
+    );
+  }
+  const initialViewState = globe
+    ? {longitude: 30, latitude: 20, zoom: 4, pitch: 35}
+    : {longitude: -122, latitude: 38, zoom: 14, pitch: 45, bearing: 10};
   const deck = new Deck({
-    canvas,
+    ...(secondCanvas ? {_canvases: [canvas, secondCanvas]} : {canvas}),
     width,
     height,
     useDevicePixels,
     pickAsync,
-    views: view,
-    initialViewState: globe
-      ? {longitude: 30, latitude: 20, zoom: 4, pitch: 35}
-      : {longitude: -122, latitude: 38, zoom: 14, pitch: 45, bearing: 10},
+    views: secondCanvas
+      ? [view, new MapView({...view.props, id: 'second', canvasId: secondCanvas.id})]
+      : view,
+    initialViewState: secondCanvas
+      ? {
+          target: initialViewState,
+          second: {...initialViewState, longitude: -74, latitude: 40.7}
+        }
+      : initialViewState,
     layers,
     onInteractionStateChange: state => states.push({...state}),
     onViewStateChange: ({viewState, interactionState}) => {
@@ -128,6 +159,7 @@ export async function createTargetScene({
     deck.device?.destroy();
     deck.device?.loseDevice();
     canvas.remove();
+    secondCanvas?.remove();
   };
   try {
     await expect.poll(() => renders, {timeout: 5000}).toBeGreaterThan(0);
@@ -139,15 +171,18 @@ export async function createTargetScene({
   return {
     deck,
     canvas,
+    secondCanvas,
+    secondCoordinate,
     coordinate,
     states,
     frames,
     errors,
     dispose,
-    viewport: () => deck.getViewports()[0] as WebMercatorViewport,
-    pixel: () => {
-      const viewport = deck.getViewports()[0];
-      const p = viewport.project(coordinate);
+    viewport: (id = 'target') =>
+      deck.getViewports().find(viewport => viewport.id === id) as WebMercatorViewport,
+    pixel: (id = 'target') => {
+      const viewport = deck.getViewports().find(v => v.id === id)!;
+      const p = viewport.project(id === 'target' ? coordinate : secondCoordinate);
       return [p[0] + viewport.x, p[1] + viewport.y] as [number, number];
     },
     setEnabled: (value: boolean) =>

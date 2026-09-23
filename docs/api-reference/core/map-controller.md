@@ -79,17 +79,9 @@ Controller-generated pan inertia, smooth wheel, double-click, and keyboard trans
 
 #### Target acquisition
 
-When `getInteractionTarget` is configured, deck.gl calls it once when a target-bearing operation starts. The callback receives:
-
-| Field | Description |
-| --- | --- |
-| `viewId` | Identifier of the view/controller acquiring the target. |
-| `operation` | One of `'pan'`, `'zoom'`, `'rotate'`, or `'pinch'`. |
-| `source` | One of `'pointer'`, `'touch'`, `'trackpad'`, `'wheel'`, `'doubleClick'`, or `'keyboard'`. |
-| `screenPosition` | View-local acquisition pixel, or `null` for pointerless input. Pointer/touch drags report their reconstructed gesture origin; trackpad gestures report the first recognized sample. |
-| `viewport` | Immutable operation-start `WebMercatorViewport`. |
-
-Return `null` to use the complete standard-controller path for that operation, or return a numeric target:
+The [shared Controller contract](./controller.md#experimental-target-navigation) defines callback
+fields, provider precedence, input origins, numeric snapshots, picking and public-state lifetime.
+For Map, the provider receives a `WebMercatorViewport` and returns a geographic target:
 
 ```ts
 type MapInteractionTarget = {
@@ -101,11 +93,9 @@ type MapInteractionTarget = {
 
 `screenPosition` is the target coordinate's honest projected view-local pixel. It may differ from the raw acquisition pixel when an application snaps from rendered geometry to a source coordinate. `minimumTargetDistance` is a non-negative physical camera-to-target floor in metres; `0` or omission disables it. A negative or nonfinite value rejects acquisition.
 
-The target, including the minimum distance, is copied and frozen for the session. Feature IDs, selected objects, surface normals, and other application semantics are not retained. Acquisition requires the target to be finite, front-facing, inside the camera clip volume, and visible in the viewport. Once acquired, the target may move outside the viewport during a drag or transition as long as it remains otherwise valid.
+Once acquired, the target may move outside the viewport during a drag or transition as long as it remains otherwise valid.
 
 If the camera starts closer than a positive `minimumTargetDistance`, the acquisition distance becomes the session floor. This avoids an outward jump while preventing further zoom-in. Zoom-out remains unrestricted. The viewport applies the floor analytically, so one coarse zoom request and equivalent smaller requests converge on the same physical limit.
-
-Without a provider, deck.gl attempts a synchronous controller 3D pick. This requires a layer with `pickable: '3d'`. The built-in pick is unavailable when picking is asynchronous, including WebGPU, but a synchronous application provider can still enable target navigation in that mode.
 
 Orthographic `MapView`, custom projection matrices, legacy metre sizing, and controllers configured with `rubberBand` take the complete standard-controller path without invoking either target callback. Overlapping independent pinch/multipan recognizers use the rebased stock handoff described in the base Controller contract.
 
@@ -115,13 +105,11 @@ Orthographic `MapView`, custom projection matrices, legacy metre sizing, and con
 
 The callback must return a complete canonical map view state or `null`. Deck then applies ordinary `MapState` constraints and validates finiteness, clipping, target pixel, the operation-specific invariant, and the session minimum distance. A rejected result keeps the last valid state.
 
-Both application callbacks are synchronous. The acquired numeric target and constraint callback are frozen for an active session; replacements affect the next session. The constraint callback must not call `Controller.setProps` synchronously; doing so throws to prevent partial controller reconfiguration. Reconfiguration during provider resolution discards that acquisition. Other callback exceptions clear target ownership and propagate from `handleEvent` or `updateTransition`.
-
-While the target is owned, [`InteractionState`](./deck.md#oninteractionstatechange) exposes its numeric coordinate as `interactionTargetPosition` together with the owning `viewId`. Target-relative rotation also exposes the same coordinate as `rotationPivotPosition` for compatibility. These fields clear on completion, cancellation, interruption, controller replacement, finalization, or callback failure.
+The synchronous constraint callback is frozen for an active session; replacements affect the next session. It must not call `Controller.setProps` synchronously; doing so throws to prevent partial controller reconfiguration. Exceptions clear target ownership and propagate from `handleEvent` or `updateTransition`, following the shared lifecycle contract.
 
 ### `resolveInteractionTarget` {#resolveinteractiontarget}
 
-This protected method is the controller-level resolver used by target navigation. It receives the view-local pointer position (or `null` for pointerless input), operation, and source, and returns a numeric `MapInteractionTarget` or `null`. The default implementation invokes `getInteractionTarget` when supplied, otherwise tries deck.gl's synchronous controller picker. Subclasses may override it, but returned targets are still copied and checked against the current perspective viewport before acquisition.
+Inherited from [Controller](./controller.md#resolveinteractiontarget). Map validates the resolved numeric target against the current perspective `WebMercatorViewport`; subclasses do not bypass that validation.
 
 ## Custom MapController
 

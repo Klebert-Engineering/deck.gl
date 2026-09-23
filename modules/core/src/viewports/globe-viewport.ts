@@ -6,7 +6,8 @@ import {Matrix4, vec3, vec4} from '@math.gl/core';
 import {altitudeToFovy, fovyToAltitude, MAX_LATITUDE} from '@math.gl/web-mercator';
 import Viewport from './viewport';
 import {PROJECTION_MODE} from '../lib/constants';
-import {mod} from '../utils/math-utils';
+import {getProjectionParameters, mod} from '../utils/math-utils';
+import isFiniteTuple from '../utils/is-finite-tuple';
 import {Globe, zoomAdjust} from './globe-utils';
 export {zoomAdjust} from './globe-utils';
 import type {TargetInfo} from './target-navigation';
@@ -227,9 +228,7 @@ export default class GlobeViewport extends Viewport {
   getTargetInfo(target: [number, number, number]): GlobeTargetInfo | null {
     if (
       !this.supportsTargetNavigation ||
-      !Array.isArray(target) ||
-      target.length !== 3 ||
-      !target.every(Number.isFinite) ||
+      !isFiniteTuple(target, 3) ||
       Math.abs(target[1]) > 90 ||
       target[2] < 0
     ) {
@@ -239,8 +238,7 @@ export default class GlobeViewport extends Viewport {
     const projectedPosition = this.project(target) as [number, number, number];
     const cameraTarget = new Matrix4(this.viewMatrix).transformAsPoint(commonTarget);
     const cameraDepth = -cameraTarget[2];
-    const near = this.projectionMatrix[14] / (this.projectionMatrix[10] - 1);
-    const far = this.projectionMatrix[14] / (this.projectionMatrix[10] + 1);
+    const {near, far} = getProjectionParameters(this.projectionMatrix);
     const direction = vec3.sub([], commonTarget, this.cameraPosition);
     const distanceSquared = vec3.squaredLength(direction);
     const targetDistance = Math.sqrt(distanceSquared) * this.distanceScales.metersPerUnit[0];
@@ -292,9 +290,8 @@ export default class GlobeViewport extends Viewport {
     const targetInfo = this.getTargetInfo(target);
     if (
       !targetInfo?.isValid ||
-      !Array.isArray(screenPosition) ||
-      screenPosition.length !== 2 ||
-      ![...screenPosition, bearing, pitch, zoom, minimumTargetDistance].every(Number.isFinite) ||
+      !isFiniteTuple(screenPosition, 2) ||
+      ![bearing, pitch, zoom, minimumTargetDistance].every(Number.isFinite) ||
       minimumTargetDistance < 0
     ) {
       return null;
@@ -345,12 +342,7 @@ export default class GlobeViewport extends Viewport {
   /** Rotates the spherical camera frame to move a target to a new view-local pixel. */
   getTargetPanViewState(options: GlobeTargetPanViewStateOptions): GlobeTargetViewState | null {
     const {target, screenPosition} = options;
-    if (
-      !this.getTargetInfo(target)?.isValid ||
-      !Array.isArray(screenPosition) ||
-      screenPosition.length !== 2 ||
-      !screenPosition.every(Number.isFinite)
-    ) {
+    if (!this.getTargetInfo(target)?.isValid || !isFiniteTuple(screenPosition, 2)) {
       return null;
     }
     const currentTarget = this.unproject(screenPosition, {targetZ: target[2]});

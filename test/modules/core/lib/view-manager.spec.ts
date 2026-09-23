@@ -3,7 +3,8 @@
 // Copyright (c) vis.gl contributors
 
 import {test, expect, vi} from 'vitest';
-import {MapView, TerrainController} from '@deck.gl/core';
+import {MapView, MapController, TerrainController, type InteractionState} from '@deck.gl/core';
+import {Timeline} from '@luma.gl/engine';
 import ViewManager from '@deck.gl/core/lib/view-manager';
 import {equals} from '@math.gl/core';
 import {EventManager} from 'mjolnir.js';
@@ -238,6 +239,99 @@ test('ViewManager#update view props', () => {
   ).toBeTruthy();
 
   viewManager.finalize();
+});
+
+test.each([
+  'canvas migration',
+  'event manager replacement',
+  'view removal',
+  'controller replacement'
+])('ViewManager disposes an active wheel target and transition on %s', change => {
+  vi.useFakeTimers();
+  const left = new EventManager(document.createElement('div'));
+  const right = new EventManager(document.createElement('div'));
+  const timeline = new Timeline();
+  const states: InteractionState[] = [];
+  const coordinate: [number, number, number] = [-122, 38, 250];
+  const provider = vi.fn(({viewport}) => ({
+    coordinate,
+    screenPosition: viewport.project(coordinate).slice(0, 2)
+  }));
+  const view = new MapView({
+    id: 'target',
+    canvasId: 'left',
+    controller: {
+      _targetNavigation: true,
+      getInteractionTarget: provider,
+      scrollZoom: {smooth: true}
+    }
+  });
+  let viewManager: ViewManager<MapView[]>;
+  viewManager = new ViewManager({
+    timeline,
+    views: [view],
+    viewState: {longitude: -122, latitude: 38, zoom: 14, pitch: 45},
+    width: 800,
+    height: 600,
+    eventManagers: {left, right},
+    onInteractionStateChange: state => states.push({...state}),
+    onViewStateChange: ({viewState}) => viewManager?.setProps({viewState})
+  });
+  const wheel = {
+    type: 'wheel',
+    pointerType: 'mouse',
+    device: 'mouse',
+    delta: 20,
+    offsetCenter: {x: 400, y: 300},
+    srcEvent: {preventDefault() {}},
+    stopPropagation() {}
+  };
+  try {
+    const oldController = viewManager.controllers.target!;
+    oldController.handleEvent(wheel as any);
+    expect(states.at(-1)?.interactionTargetPosition).toEqual(coordinate);
+    expect((oldController as any).transitionManager.transition.inProgress).toBe(true);
+    expect((oldController as any)._wheelTargetTimer).not.toBeNull();
+    class ReplacementController extends MapController {}
+    if (change === 'event manager replacement') {
+      viewManager.setProps({eventManagers: {left: right, right}});
+    } else {
+      viewManager.setProps({
+        views:
+          change === 'view removal'
+            ? []
+            : [
+                new MapView({
+                  ...view.props,
+                  ...(change === 'canvas migration' ? {canvasId: 'right'} : {}),
+                  ...(change === 'controller replacement'
+                    ? {
+                        controller: {...view.controller, type: ReplacementController}
+                      }
+                    : {})
+                })
+              ]
+      });
+    }
+    expect(viewManager.controllers.target).not.toBe(oldController);
+    expect((oldController as any)._wheelTargetTimer).toBeNull();
+    expect((oldController as any).transitionManager.transition.inProgress).toBe(false);
+    expect(states.at(-1)?.interactionTargetPosition).toBeUndefined();
+    const releasedCount = states.length;
+    vi.advanceTimersByTime(500);
+    timeline.setTime(500);
+    oldController.updateTransition();
+    expect(states).toHaveLength(releasedCount);
+    if (change === 'view removal') viewManager.setProps({views: [view]});
+    viewManager.controllers.target!.handleEvent(wheel as any);
+    expect(provider).toHaveBeenCalledTimes(2);
+    expect(states.at(-1)?.interactionTargetPosition).toEqual(coordinate);
+  } finally {
+    viewManager.finalize();
+    left.destroy();
+    right.destroy();
+    vi.useRealTimers();
+  }
 });
 
 test('ViewManager#routes controllers by canvas event manager', () => {

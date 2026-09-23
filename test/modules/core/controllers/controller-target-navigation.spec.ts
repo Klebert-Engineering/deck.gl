@@ -279,6 +279,9 @@ describe('Controller shared target lifecycle', () => {
     {coordinate: new Array(3)},
     {screenPosition: [Infinity, 2]},
     {screenPosition: [1]},
+    {screenPosition: [1, 2, 3]},
+    {screenPosition: new Array(2)},
+    {screenPosition: Object.assign(new Array(2), {0: 100})},
     {minimumTargetDistance: -1}
   ])('rejects malformed numeric snapshots %j', invalid => {
     const target = {
